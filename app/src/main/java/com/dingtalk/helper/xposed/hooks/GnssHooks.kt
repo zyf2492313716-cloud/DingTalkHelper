@@ -292,39 +292,70 @@ class GnssHooks : HookEntry.HookHandler {
                 "android.location.LocationManager", lpparam.classLoader
             )
 
-            // 阻止真实注册，发送伪造数据
-            XposedHelpers.findAndHookMethod(
-                locationManagerClass,
-                "registerGnssNavigationMessageCallback",
-                GnssNavigationMessage.Callback::class.java,
-                android.os.Handler::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        param.result = null
-                        val callback = param.args[0] as GnssNavigationMessage.Callback
-                        val handler = param.args[1] as? android.os.Handler
-                        
-                        // 发送伪造的导航消息
-                        val fakeMessage = createFakeGnssNavigationMessage()
-                        
-                        // 使用 handler 或默认线程发送
-                        val runnable = Runnable {
-                            try {
-                                callback.onGnssNavigationMessageReceived(fakeMessage)
-                            } catch (e: Exception) {
-                                HookUtils.log("$TAG: 发送伪造导航消息失败: ${e.message}")
-                            }
-                        }
-                        
-                        if (handler != null) {
-                            handler.post(runnable)
-                        } else {
-                            // 如果没有 handler，在主线程发送
-                            android.os.Handler(android.os.Looper.getMainLooper()).post(runnable)
+            val hookCallback = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    param.result = null
+                    val callback = param.args.firstOrNull {
+                        it is GnssNavigationMessage.Callback
+                    } as? GnssNavigationMessage.Callback ?: return
+                    val handler = param.args.firstOrNull {
+                        it is android.os.Handler
+                    } as? android.os.Handler
+                    val executor = param.args.firstOrNull {
+                        it is java.util.concurrent.Executor
+                    } as? java.util.concurrent.Executor
+
+                    val fakeMessage = createFakeGnssNavigationMessage()
+
+                    val runnable = Runnable {
+                        try {
+                            callback.onGnssNavigationMessageReceived(fakeMessage)
+                        } catch (e: Exception) {
+                            HookUtils.log("$TAG: 发送伪造导航消息失败: ${e.message}")
                         }
                     }
+
+                    when {
+                        handler != null -> handler.post(runnable)
+                        executor != null -> executor.execute(runnable)
+                        else -> android.os.Handler(android.os.Looper.getMainLooper()).post(runnable)
+                    }
                 }
-            )
+            }
+
+            // (Callback, Handler)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    locationManagerClass,
+                    "registerGnssNavigationMessageCallback",
+                    GnssNavigationMessage.Callback::class.java,
+                    android.os.Handler::class.java,
+                    hookCallback
+                )
+                HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Callback, Handler) Hook 完成")
+            } catch (e: NoSuchMethodError) {
+                HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Callback, Handler) 重载不存在")
+            } catch (e: Exception) {
+                HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Callback, Handler) Hook 失败: ${e.message}")
+            }
+
+            // API 30+: (Executor, Callback)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        locationManagerClass,
+                        "registerGnssNavigationMessageCallback",
+                        java.util.concurrent.Executor::class.java,
+                        GnssNavigationMessage.Callback::class.java,
+                        hookCallback
+                    )
+                    HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Executor, Callback) Hook 完成")
+                } catch (e: NoSuchMethodError) {
+                    HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Executor, Callback) 重载不存在")
+                } catch (e: Exception) {
+                    HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Executor, Callback) Hook 失败: ${e.message}")
+                }
+            }
 
             HookUtils.log("$TAG: GnssNavigationMessage Hook 完成")
         } catch (e: Exception) {
