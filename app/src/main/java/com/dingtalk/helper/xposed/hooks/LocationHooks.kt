@@ -434,34 +434,119 @@ class LocationHooks : HookEntry.HookHandler {
     }
 
     private fun hookRequestLocationUpdates(clazz: Class<*>) {
+        val hookCallback = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!shouldHook()) return
+
+                val listener = param.args.firstOrNull {
+                    it is android.location.LocationListener
+                } as? android.location.LocationListener ?: return
+
+                val fakeLocation = getOrCreateFakeLocation()
+
+                Thread {
+                    try {
+                        Thread.sleep(100)
+                        listener.onLocationChanged(fakeLocation)
+                    } catch (_: Exception) {}
+                }.start()
+            }
+        }
+
+        val signatures = listOf(
+            // (String, long, float, LocationListener)
+            arrayOf(
+                String::class.java,
+                Long::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                android.location.LocationListener::class.java
+            ),
+            // (String, long, float, LocationListener, Looper)
+            arrayOf(
+                String::class.java,
+                Long::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                android.location.LocationListener::class.java,
+                android.os.Looper::class.java
+            )
+        )
+
+        for (signature in signatures) {
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clazz,
+                    "requestLocationUpdates",
+                    *signature,
+                    hookCallback
+                )
+                HookUtils.logDebug("$TAG: requestLocationUpdates Hook 完成: ${signatureToString(signature)}")
+            } catch (e: NoSuchMethodError) {
+                HookUtils.logDebug("$TAG: requestLocationUpdates 重载不存在: ${signatureToString(signature)}")
+            } catch (e: Exception) {
+                HookUtils.logDebug("$TAG: requestLocationUpdates Hook 失败: ${e.message}")
+            }
+        }
+
+        // (String, long, float, PendingIntent)
         try {
             XposedHelpers.findAndHookMethod(
                 clazz,
                 "requestLocationUpdates",
                 String::class.java,
-                Long::class.java,
-                Float::class.java,
-                android.location.LocationListener::class.java,
+                Long::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                android.app.PendingIntent::class.java,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (!shouldHook()) return
 
-                        val listener = param.args[3] as android.location.LocationListener
+                        val pendingIntent = param.args[3] as? android.app.PendingIntent ?: return
                         val fakeLocation = getOrCreateFakeLocation()
 
                         Thread {
                             try {
                                 Thread.sleep(100)
-                                listener.onLocationChanged(fakeLocation)
+                                val intent = android.content.Intent().apply {
+                                    putExtra(android.location.LocationManager.KEY_LOCATION_CHANGED, fakeLocation)
+                                }
+                                val context = android.app.AndroidAppHelper.currentApplication()
+                                pendingIntent.send(context, 0, intent)
                             } catch (_: Exception) {}
                         }.start()
                     }
                 }
             )
-            HookUtils.logDebug("$TAG: requestLocationUpdates Hook 完成")
+            HookUtils.logDebug("$TAG: requestLocationUpdates(PendingIntent) Hook 完成")
+        } catch (e: NoSuchMethodError) {
+            HookUtils.logDebug("$TAG: requestLocationUpdates(PendingIntent) 重载不存在")
         } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: requestLocationUpdates Hook 失败: ${e.message}")
+            HookUtils.logDebug("$TAG: requestLocationUpdates(PendingIntent) Hook 失败: ${e.message}")
         }
+
+        // API 30+: (String, long, float, LocationListener, Executor)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clazz,
+                    "requestLocationUpdates",
+                    String::class.java,
+                    Long::class.javaPrimitiveType,
+                    Float::class.javaPrimitiveType,
+                    android.location.LocationListener::class.java,
+                    java.util.concurrent.Executor::class.java,
+                    hookCallback
+                )
+                HookUtils.logDebug("$TAG: requestLocationUpdates(Executor) Hook 完成")
+            } catch (e: NoSuchMethodError) {
+                HookUtils.logDebug("$TAG: requestLocationUpdates(Executor) 重载不存在")
+            } catch (e: Exception) {
+                HookUtils.logDebug("$TAG: requestLocationUpdates(Executor) Hook 失败: ${e.message}")
+            }
+        }
+    }
+
+    private fun signatureToString(signature: Array<Class<*>>): String {
+        return signature.joinToString(", ") { it.simpleName }
     }
 
     private fun hookGnssStatus(clazz: Class<*>) {

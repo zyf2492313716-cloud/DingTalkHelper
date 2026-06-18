@@ -58,34 +58,57 @@ class SensorHooks : HookEntry.HookHandler {
                 "android.hardware.SensorManager", lpparam.classLoader
             )
 
-            XposedHelpers.findAndHookMethod(
-                sensorManagerClass, "registerListener",
-                SensorEventListener::class.java,
-                Sensor::class.java,
-                Int::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (!ConfigManager.isEnabled()) return
-                        val sensor = param.args[1] as? Sensor ?: return
-                        registerSensorModifier(sensor.type)
-                    }
+            val hookCallback = object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!ConfigManager.isEnabled()) return
+                    val sensor = param.args[1] as? Sensor ?: return
+                    registerSensorModifier(sensor.type)
                 }
+            }
+
+            val signatures = listOf(
+                // (SensorEventListener, Sensor, int)
+                arrayOf(
+                    SensorEventListener::class.java,
+                    Sensor::class.java,
+                    Int::class.javaPrimitiveType
+                ),
+                // (SensorEventListener, Sensor, int, int)
+                arrayOf(
+                    SensorEventListener::class.java,
+                    Sensor::class.java,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType
+                ),
+                // (SensorEventListener, Sensor, int, Handler)
+                arrayOf(
+                    SensorEventListener::class.java,
+                    Sensor::class.java,
+                    Int::class.javaPrimitiveType,
+                    android.os.Handler::class.java
+                ),
+                // (SensorEventListener, Sensor, int, int, Handler)
+                arrayOf(
+                    SensorEventListener::class.java,
+                    Sensor::class.java,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    android.os.Handler::class.java
+                )
             )
 
-            XposedHelpers.findAndHookMethod(
-                sensorManagerClass, "registerListener",
-                SensorEventListener::class.java,
-                Sensor::class.java,
-                Int::class.java,
-                android.os.Handler::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (!ConfigManager.isEnabled()) return
-                        val sensor = param.args[1] as? Sensor ?: return
-                        registerSensorModifier(sensor.type)
-                    }
+            for (signature in signatures) {
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        sensorManagerClass,
+                        "registerListener",
+                        *signature,
+                        hookCallback
+                    )
+                } catch (_: NoSuchMethodError) {
+                } catch (_: Exception) {
                 }
-            )
+            }
 
             HookUtils.log("$TAG: SensorManager Hook 完成")
         } catch (e: Exception) {
