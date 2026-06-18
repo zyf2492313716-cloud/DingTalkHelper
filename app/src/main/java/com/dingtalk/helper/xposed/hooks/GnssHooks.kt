@@ -2,6 +2,7 @@ package com.dingtalk.helper.xposed.hooks
 
 import android.location.GnssClock
 import android.location.GnssMeasurement
+import android.location.GnssNavigationMessage
 import android.location.GnssStatus
 import android.os.Build
 import com.dingtalk.helper.utils.ConfigManager
@@ -19,8 +20,8 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
  *
  * 借鉴 XposedFakeLocation 的 GNSS 伪造思路：
  * - Hook GnssStatus 返回伪造的卫星数量和信号数据
- * - 阻止 GNSS 测量数据回调避免泄露真实信息
- * - 拦截导航消息回调
+ * - 返回伪造的 GNSS 测量数据（8-12颗卫星）
+ * - 返回伪造的导航消息数据
  */
 class GnssHooks : HookEntry.HookHandler {
 
@@ -137,7 +138,7 @@ class GnssHooks : HookEntry.HookHandler {
     }
 
     /**
-     * Hook GnssMeasurementsEvent - 阻止真实测量数据
+     * Hook GnssMeasurementsEvent - 返回伪造的测量数据
      */
     private fun hookGnssMeasurements(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
@@ -147,12 +148,15 @@ class GnssHooks : HookEntry.HookHandler {
                 "android.location.GnssMeasurementsEvent", lpparam.classLoader
             )
 
-            // 返回空测量列表
+            // 返回伪造的测量数据列表
             XposedHelpers.findAndHookMethod(
                 eventClass, "getMeasurements",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        param.result = emptyList<GnssMeasurement>()
+                        val measurements = (1..SATELLITE_COUNT).map { svid ->
+                            createFakeGnssMeasurement(svid)
+                        }
+                        param.result = measurements
                     }
                 }
             )
@@ -167,7 +171,41 @@ class GnssHooks : HookEntry.HookHandler {
     }
 
     /**
-     * Hook GnssClock - 返回合理的时间数据
+     * 创建伪造的 GnssMeasurement 对象
+     */
+    private fun createFakeGnssMeasurement(svid: Int): GnssMeasurement {
+        val measurement = XposedHelpers.newInstance(GnssMeasurement::class.java)
+        
+        // 设置卫星基本信息
+        XposedHelpers.setIntField(measurement, "mSvid", svid)
+        XposedHelpers.setIntField(measurement, "mConstellationType", 1) // GPS
+        
+        // 设置信噪比 (25-45 dB-Hz)
+        val cn0 = (25..45).random().toFloat()
+        XposedHelpers.setFloatField(measurement, "mCn0DbHz", cn0)
+        
+        // 设置时间偏移保持一致性
+        XposedHelpers.setDoubleField(measurement, "mTimeOffsetNanos", 0.0)
+        
+        // 设置伪距率 (模拟卫星运动)
+        val pseudorangeRate = (Math.random() * 1000 - 500).toDouble()
+        XposedHelpers.setDoubleField(measurement, "mPseudorangeRateMetersPerSecond", pseudorangeRate)
+        
+        // 设置接收卫星时间
+        val receivedSvTime = System.currentTimeMillis() * 1_000_000L
+        XposedHelpers.setLongField(measurement, "mReceivedSvTimeNanos", receivedSvTime)
+        
+        // 设置状态为已锁定
+        XposedHelpers.setIntField(measurement, "mState", 1) // STATE_CODE_LOCK
+        
+        // 设置多路径指示器为无多路径
+        XposedHelpers.setIntField(measurement, "mMultipathIndicator", 0) // MULTIPATH_INDICATOR_NOT_DETECTED
+        
+        return measurement
+    }
+
+    /**
+     * Hook GnssClock - 返回与系统时间一致的时间数据
      */
     private fun hookGnssClock(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
@@ -175,11 +213,15 @@ class GnssHooks : HookEntry.HookHandler {
                 "android.location.GnssClock", lpparam.classLoader
             )
 
+            // 返回与系统时间一致的 GPS 时间（纳秒）
             XposedHelpers.findAndHookMethod(
                 clockClass, "getTimeNanos",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return System.nanoTime()
+                        // 系统时间转换为纳秒，并添加小的随机抖动模拟真实时钟
+                        val baseTime = System.currentTimeMillis() * 1_000_000L
+                        val jitter = (Math.random() * 1000).toLong() // 0-1000 纳秒抖动
+                        return baseTime + jitter
                     }
                 }
             )
@@ -198,6 +240,41 @@ class GnssHooks : HookEntry.HookHandler {
                 }
             )
 
+            // 设置完整的时钟偏差信息以保持一致性
+            XposedHelpers.findAndHookMethod(
+                clockClass, "hasFullBiasNanos",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = true
+                }
+            )
+
+            XposedHelpers.findAndHookMethod(
+                clockClass, "getFullBiasNanos",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        // GPS 时间与系统时间的偏差
+                        return System.currentTimeMillis() * 1_000_000L - System.nanoTime()
+                    }
+                }
+            )
+
+            XposedHelpers.findAndHookMethod(
+                clockClass, "hasBiasNanos",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = true
+                }
+            )
+
+            XposedHelpers.findAndHookMethod(
+                clockClass, "getBiasNanos",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        // 小的亚纳秒级偏差
+                        return Math.random() * 0.1
+                    }
+                }
+            )
+
             HookUtils.log("$TAG: GnssClock Hook 完成")
         } catch (e: Exception) {
             HookUtils.log("$TAG: GnssClock Hook 失败: ${e.message}")
@@ -205,7 +282,7 @@ class GnssHooks : HookEntry.HookHandler {
     }
 
     /**
-     * Hook GnssNavigationMessage - 阻止导航消息回调
+     * Hook GnssNavigationMessage - 返回伪造的导航消息数据
      */
     private fun hookGnssNavigationMessage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
@@ -215,14 +292,36 @@ class GnssHooks : HookEntry.HookHandler {
                 "android.location.LocationManager", lpparam.classLoader
             )
 
+            // 阻止真实注册，发送伪造数据
             XposedHelpers.findAndHookMethod(
                 locationManagerClass,
                 "registerGnssNavigationMessageCallback",
-                android.location.GnssNavigationMessage.Callback::class.java,
+                GnssNavigationMessage.Callback::class.java,
                 android.os.Handler::class.java,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        param.result = false
+                        param.result = null
+                        val callback = param.args[0] as GnssNavigationMessage.Callback
+                        val handler = param.args[1] as? android.os.Handler
+                        
+                        // 发送伪造的导航消息
+                        val fakeMessage = createFakeGnssNavigationMessage()
+                        
+                        // 使用 handler 或默认线程发送
+                        val runnable = Runnable {
+                            try {
+                                callback.onGnssNavigationMessageReceived(fakeMessage)
+                            } catch (e: Exception) {
+                                HookUtils.log("$TAG: 发送伪造导航消息失败: ${e.message}")
+                            }
+                        }
+                        
+                        if (handler != null) {
+                            handler.post(runnable)
+                        } else {
+                            // 如果没有 handler，在主线程发送
+                            android.os.Handler(android.os.Looper.getMainLooper()).post(runnable)
+                        }
                     }
                 }
             )
@@ -231,5 +330,39 @@ class GnssHooks : HookEntry.HookHandler {
         } catch (e: Exception) {
             HookUtils.log("$TAG: GnssNavigationMessage Hook 失败: ${e.message}")
         }
+    }
+
+    /**
+     * 创建伪造的 GnssNavigationMessage 对象
+     */
+    private fun createFakeGnssNavigationMessage(): GnssNavigationMessage {
+        val message = XposedHelpers.newInstance(GnssNavigationMessage::class.java)
+        
+        // 设置卫星编号 (1-32 for GPS)
+        XposedHelpers.setIntField(message, "mSvid", (1..32).random())
+        
+        // 设置星座类型 (GPS = 1)
+        XposedHelpers.setIntField(message, "mConstellationType", 1)
+        
+        // 设置消息类型 (导航消息类型)
+        XposedHelpers.setIntField(message, "mType", 1) // GPS L1 C/A
+        
+        // 设置状态 (已同步)
+        XposedHelpers.setIntField(message, "mStatus", 1) // STATUS_PARITY_PASSED
+        
+        // 设置伪造的子帧数据 (24 字节)
+        val data = ByteArray(24)
+        (0 until 24).forEach { i ->
+            data[i] = (Math.random() * 256).toInt().toByte()
+        }
+        XposedHelpers.setObjectField(message, "mData", data)
+        
+        // 设置消息编号
+        XposedHelpers.setIntField(message, "mMessageId", (1..10).random())
+        
+        // 设置子消息编号
+        XposedHelpers.setIntField(message, "mSubmessageId", (1..5).random())
+        
+        return message
     }
 }

@@ -1,9 +1,7 @@
 package com.dingtalk.helper.xposed.hooks
 
 import android.hardware.Sensor
-import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
 import com.dingtalk.helper.xposed.utils.Constants
@@ -11,19 +9,39 @@ import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.cos
+import kotlin.math.sin
 
-/**
- * 传感器数据伪造 Hook
- * 拦截传感器数据，使设备看起来处于静止状态
- * 防止钉钉通过陀螺仪/加速度计检测异常移动模式
- */
 class SensorHooks : HookEntry.HookHandler {
 
     companion object {
         private const val TAG = "${Constants.LOG_PREFIX}:Sensor"
 
-        // 传感器数据修改器缓存
-        private val sensorModifiers = mutableMapOf<Int, (FloatArray) -> FloatArray>()
+        private const val GRAVITY = 9.80665f
+
+        // 静止状态噪声幅度
+        private const val ACCEL_STATIC_NOISE = 0.02f
+        private const val GYRO_STATIC_NOISE = 0.001f
+        private const val MAG_STATIC_NOISE = 1.0f
+
+        // 移动状态参数
+        private const val ACCEL_WALK_AMPLITUDE = 0.4f
+        private const val GYRO_WALK_AMPLITUDE = 0.03f
+        private const val WALK_FREQ_HZ = 2.0
+        private const val TWO_PI = 6.2831853f
+
+        // 呼吸/心跳微小变化频率
+        private const val BREATH_FREQ_HZ = 0.25
+        private const val HEARTBEAT_FREQ_HZ = 1.2
+        private const val BREATH_AMPLITUDE = 0.005f
+        private const val HEARTBEAT_AMPLITUDE = 0.002f
+
+        // 地球磁场垂直分量 (微特斯拉)，中国地区参考值
+        private const val MAG_DOWN_BASE = -42.0f
+
+        // 传感器类型到修改器的映射
+        private val sensorModifiers = ConcurrentHashMap<Int, (FloatArray, Long) -> FloatArray>()
     }
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -34,16 +52,12 @@ class SensorHooks : HookEntry.HookHandler {
         hookSensorEvent(lpparam)
     }
 
-    /**
-     * Hook SensorManager.registerListener - 记录监听的传感器类型
-     */
     private fun hookSensorManager(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val sensorManagerClass = XposedHelpers.findClass(
                 "android.hardware.SensorManager", lpparam.classLoader
             )
 
-            // Hook registerListener (带 int delay 参数)
             XposedHelpers.findAndHookMethod(
                 sensorManagerClass, "registerListener",
                 SensorEventListener::class.java,
@@ -58,7 +72,6 @@ class SensorHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook registerListener (带 Handler 参数)
             XposedHelpers.findAndHookMethod(
                 sensorManagerClass, "registerListener",
                 SensorEventListener::class.java,
@@ -80,22 +93,12 @@ class SensorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook SensorEvent.values - 在数据回调时注入伪造值
-     */
     private fun hookSensorEvent(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
-            val sensorEventClass = XposedHelpers.findClass(
-                "android.hardware.SensorEvent", lpparam.classLoader
-            )
-
-            // 通过 Hook SensorEventListener.onSensorDispatch 间接修改数据
-            // 更可靠的方式是直接在 SensorManager 层面拦截
             val sensorManagerClass = XposedHelpers.findClass(
                 "android.hardware.SensorManager", lpparam.classLoader
             )
 
-            // 尝试 Hook dispatchSensorEvent (内部方法)
             try {
                 XposedHelpers.findAndHookMethod(
                     sensorManagerClass,
@@ -110,15 +113,15 @@ class SensorHooks : HookEntry.HookHandler {
 
                             val sensorType = param.args[0] as? Int ?: return
                             val values = param.args[1] as? FloatArray ?: return
+                            val timestamp = param.args[3] as? Long ?: 0L
 
                             val modifier = sensorModifiers[sensorType] ?: return
-                            val modified = modifier(values)
+                            val modified = modifier(values, timestamp)
                             System.arraycopy(modified, 0, values, 0, minOf(values.size, modified.size))
                         }
                     }
                 )
             } catch (_: NoSuchMethodError) {
-                // 不同 Android 版本方法签名不同，忽略
             }
 
             HookUtils.log("$TAG: SensorEvent Hook 完成")
@@ -127,46 +130,124 @@ class SensorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * 注册传感器数据修改器
-     */
     private fun registerSensorModifier(sensorType: Int) {
         if (sensorModifiers.containsKey(sensorType)) return
 
         when (sensorType) {
-            Sensor.TYPE_GYROSCOPE -> {
-                sensorModifiers[sensorType] = { values ->
-                    // 模拟静止：微小噪声
-                    floatArrayOf(
-                        (values[0] * 0.01 + (Math.random() * 0.002 - 0.001)).toFloat(),
-                        (values[1] * 0.01 + (Math.random() * 0.002 - 0.001)).toFloat(),
-                        (values[2] * 0.01 + (Math.random() * 0.002 - 0.001)).toFloat()
-                    )
-                }
-                HookUtils.logDebug("$TAG: 注册陀螺仪修改器")
-            }
             Sensor.TYPE_ACCELEROMETER -> {
-                sensorModifiers[sensorType] = { values ->
-                    // 模拟静止：重力 + 微小噪声
-                    floatArrayOf(
-                        (Math.random() * 0.04 - 0.02).toFloat(),
-                        (Math.random() * 0.04 - 0.02).toFloat(),
-                        (9.8 + Math.random() * 0.04 - 0.02).toFloat()
-                    )
-                }
+                sensorModifiers[sensorType] = ::modifyAccelerometer
                 HookUtils.logDebug("$TAG: 注册加速度计修改器")
             }
+            Sensor.TYPE_GYROSCOPE -> {
+                sensorModifiers[sensorType] = ::modifyGyroscope
+                HookUtils.logDebug("$TAG: 注册陀螺仪修改器")
+            }
             Sensor.TYPE_MAGNETIC_FIELD -> {
-                sensorModifiers[sensorType] = { values ->
-                    // 返回合理的地球磁场值（微特斯拉）
-                    floatArrayOf(
-                        (25 + Math.random() * 2 - 1).toFloat(),
-                        (5 + Math.random() * 2 - 1).toFloat(),
-                        (-45 + Math.random() * 2 - 1).toFloat()
-                    )
-                }
+                sensorModifiers[sensorType] = ::modifyMagneticField
                 HookUtils.logDebug("$TAG: 注册磁力计修改器")
             }
         }
+    }
+
+    private fun isMoving(): Boolean {
+        return try {
+            ConfigManager.getFakeLocation().speed > 0f
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun getBearing(): Float {
+        return try {
+            ConfigManager.getFakeLocation().bearing
+        } catch (_: Exception) {
+            0f
+        }
+    }
+
+    private fun modifyAccelerometer(values: FloatArray, timestamp: Long): FloatArray {
+        val t = timestamp / 1_000_000_000.0f
+        val result = FloatArray(3)
+
+        if (isMoving()) {
+            val walkPhase = (t * WALK_FREQ_HZ * TWO_PI).toDouble()
+            val walkSin = sin(walkPhase).toFloat()
+
+            result[0] = (ACCEL_WALK_AMPLITUDE * 0.3f * walkSin +
+                    gaussianNoise(ACCEL_STATIC_NOISE * 0.5f))
+            result[1] = (ACCEL_WALK_AMPLITUDE * 0.15f * sin(walkPhase * 0.7).toFloat() +
+                    gaussianNoise(ACCEL_STATIC_NOISE * 0.5f))
+            result[2] = (GRAVITY + ACCEL_WALK_AMPLITUDE * 0.5f * sin(walkPhase * 2).toFloat() +
+                    gaussianNoise(ACCEL_STATIC_NOISE * 0.5f))
+        } else {
+            val breathPhase = (t * BREATH_FREQ_HZ * TWO_PI).toDouble()
+            val heartPhase = (t * HEARTBEAT_FREQ_HZ * TWO_PI).toDouble()
+
+            val breathX = (BREATH_AMPLITUDE * sin(breathPhase)).toFloat()
+            val breathY = (BREATH_AMPLITUDE * sin(breathPhase + 1.57)).toFloat()
+            val heartZ = (HEARTBEAT_AMPLITUDE * sin(heartPhase)).toFloat()
+
+            result[0] = breathX + gaussianNoise(ACCEL_STATIC_NOISE)
+            result[1] = breathY + gaussianNoise(ACCEL_STATIC_NOISE)
+            result[2] = GRAVITY + heartZ + gaussianNoise(ACCEL_STATIC_NOISE)
+        }
+
+        return result
+    }
+
+    private fun modifyGyroscope(values: FloatArray, timestamp: Long): FloatArray {
+        val t = timestamp / 1_000_000_000.0f
+        val result = FloatArray(3)
+
+        if (isMoving()) {
+            val walkPhase = (t * WALK_FREQ_HZ * TWO_PI).toDouble()
+
+            result[0] = (GYRO_WALK_AMPLITUDE * sin(walkPhase * 0.8).toFloat() +
+                    gaussianNoise(GYRO_STATIC_NOISE))
+            result[1] = (GYRO_WALK_AMPLITUDE * 0.5f * cos(walkPhase).toFloat() +
+                    gaussianNoise(GYRO_STATIC_NOISE))
+            result[2] = gaussianNoise(GYRO_STATIC_NOISE * 1.5f)
+        } else {
+            val drift = (t * 0.0001f) % 0.0005f
+
+            result[0] = gaussianNoise(GYRO_STATIC_NOISE) + drift * sin(t * 0.3).toFloat()
+            result[1] = gaussianNoise(GYRO_STATIC_NOISE) + drift * cos(t * 0.5).toFloat()
+            result[2] = gaussianNoise(GYRO_STATIC_NOISE)
+        }
+
+        return result
+    }
+
+    private fun modifyMagneticField(values: FloatArray, timestamp: Long): FloatArray {
+        val bearing = getBearing()
+        val bearingRad = Math.toRadians(bearing.toDouble()).toFloat()
+
+        val declination = getMagneticDeclination()
+
+        val noiseScale = if (isMoving()) MAG_STATIC_NOISE * 2f else MAG_STATIC_NOISE
+
+        val result = FloatArray(3)
+        val horizontalMag = 30.0f
+        result[0] = horizontalMag * cos(bearingRad) + gaussianNoise(noiseScale)
+        result[1] = -horizontalMag * sin(bearingRad) * cos(declination) +
+                MAG_DOWN_BASE * sin(declination) + gaussianNoise(noiseScale)
+        result[2] = horizontalMag * sin(bearingRad) * sin(declination) +
+                MAG_DOWN_BASE * cos(declination) + gaussianNoise(noiseScale)
+
+        return result
+    }
+
+    private fun getMagneticDeclination(): Float {
+        return try {
+            val lat = ConfigManager.getLatitude()
+            val lon = ConfigManager.getLongitude()
+            ((lon * 0.01 + lat * 0.005) % 360.0).toFloat() * 0.01745f
+        } catch (_: Exception) {
+            0.1f
+        }
+    }
+
+    private fun gaussianNoise(amplitude: Float): Float {
+        return ((Math.random() + Math.random() + Math.random() - 1.5) * 0.667 * amplitude).toFloat()
     }
 }
