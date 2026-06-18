@@ -126,17 +126,17 @@ class SensorHooks : HookEntry.HookHandler {
                 XposedHelpers.findAndHookMethod(
                     sensorManagerClass,
                     "dispatchSensorEvent",
-                    Int::class.java,
+                    Int::class.javaPrimitiveType,
                     FloatArray::class.java,
-                    Int::class.java,
-                    Long::class.java,
+                    Int::class.javaPrimitiveType,
+                    Long::class.javaPrimitiveType,
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (!ConfigManager.isEnabled()) return
 
-                            val sensorType = param.args[0] as? Int ?: return
+                            val sensorType = (param.args[0] as? Number)?.toInt() ?: return
                             val values = param.args[1] as? FloatArray ?: return
-                            val timestamp = param.args[3] as? Long ?: 0L
+                            val timestamp = (param.args[3] as? Number)?.toLong() ?: 0L
 
                             val modifier = sensorModifiers[sensorType] ?: return
                             val modified = modifier(values, timestamp)
