@@ -13,38 +13,303 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
-import java.util.Random
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ThreadLocalRandom
 
 /**
  * GPS 位置伪造 Hook
  * 负责拦截和替换位置信息
  *
- * 借鉴 FuckLocation 项目的简洁实现：
- * - 统一 Hook LocationManager 的所有获取位置入口
- * - 伪造位置带微小随机偏移模拟真实 GPS 波动
- * - 清除 mock 标记位
+ * 优化特性：
+ * - 可变 TTL 缓存（1-10秒随机），模拟真实 GPS 更新间隔
+ * - 位置漂移模拟，每次返回微小变化的位置
+ * - 历史位置轨迹记录
+ * - 速度/方向/海拔动态模拟
+ * - 位置一致性验证接口，供 WiFi/基站 Hook 交叉校验
+ * - 完整的 mock 标记隐藏（provider/hasAltitude/hasSpeed）
  */
 class LocationHooks : HookEntry.HookHandler {
 
     companion object {
         private const val TAG = "${Constants.LOG_PREFIX}:Location"
 
-        // 随机偏移范围（约 5-15 米，模拟 GPS 漂移）
-        private const val MIN_OFFSET = 0.00005
+        // GPS 漂移范围（约 5-15 米）
         private const val MAX_OFFSET = 0.00015
 
-        private val random = Random()
+        // 可变 TTL 范围（毫秒），模拟真实 GPS 芯片更新间隔
+        private const val CACHE_TTL_MIN_MS = 1000L
+        private const val CACHE_TTL_MAX_MS = 10000L
 
-        // 上次生成的伪造位置，用于一致性
+        // 速度模拟范围（m/s）：静止 0~0.3，步行 0.8~1.5，车载 5~15
+        private const val SPEED_STILL_MAX = 0.3f
+        private const val SPEED_WALK_MIN = 0.8f
+        private const val SPEED_WALK_MAX = 1.5f
+
+        // 海拔漂移范围（米）
+        private const val ALTITUDE_DRIFT_MAX = 3.0
+
+        // 方向漂移范围（度）
+        private const val BEARING_DRIFT_MAX = 15.0f
+
+        // 历史轨迹最大记录数
+        private const val MAX_HISTORY_SIZE = 100
+
         @Volatile
         private var cachedLocation: Location? = null
 
-        // 缓存有效期（毫秒），超时后重新生成以模拟 GPS 更新
-        private const val CACHE_TTL_MS = 3000L
-
         @Volatile
         private var lastCacheTime = 0L
+
+        @Volatile
+        private var currentCacheTtlMs = CACHE_TTL_MIN_MS
+
+        // 上一次返回的位置坐标，用于漂移连续性
+        @Volatile
+        private var lastLatitude = 0.0
+
+        @Volatile
+        private var lastLongitude = 0.0
+
+        @Volatile
+        private var lastAltitude = 0.0
+
+        @Volatile
+        private var lastBearing = 0f
+
+        @Volatile
+        private var lastSpeed = 0f
+
+        @Volatile
+        private var isInitialized = false
+
+        // 历史轨迹
+        private val locationHistory = CopyOnWriteArrayList<LocationEntry>()
+
+        /**
+         * 获取当前伪造位置（供其他 Hook 模块查询，确保一致性）
+         */
+        fun getCurrentFakeLocation(): ConfigManager.FakeLocation {
+            val location = getOrCreateFakeLocation()
+            return ConfigManager.FakeLocation(
+                latitude = location.latitude,
+                longitude = location.longitude,
+                altitude = location.altitude,
+                speed = location.speed,
+                bearing = location.bearing,
+                accuracy = location.accuracy
+            )
+        }
+
+        /**
+         * 检查给定坐标是否与当前伪造位置匹配（容差 50 米）
+         * 供 WiFi/基站 Hook 进行一致性校验
+         */
+        fun isLocationMatch(lat: Double, lng: Double): Boolean {
+            val current = getOrCreateFakeLocation()
+            val distance = calculateDistance(
+                current.latitude, current.longitude, lat, lng
+            )
+            return distance < 50.0
+        }
+
+        /**
+         * 获取历史轨迹（只读副本）
+         */
+        fun getLocationHistory(): List<LocationEntry> {
+            return locationHistory.toList()
+        }
+
+        /**
+         * 获取或创建伪造位置（内部方法）
+         */
+        internal fun getOrCreateFakeLocation(): Location {
+            val now = System.currentTimeMillis()
+            val cached = cachedLocation
+
+            if (cached != null && (now - lastCacheTime) < currentCacheTtlMs) {
+                return cached
+            }
+
+            val newLocation = createFakeLocationInternal()
+            cachedLocation = newLocation
+            lastCacheTime = now
+
+            // 生成下一次的随机 TTL
+            currentCacheTtlMs = CACHE_TTL_MIN_MS +
+                ThreadLocalRandom.current().nextInt((CACHE_TTL_MAX_MS - CACHE_TTL_MIN_MS + 1).toInt())
+
+            return newLocation
+        }
+
+        /**
+         * 创建伪造位置（内部实现）
+         */
+        private fun createFakeLocationInternal(): Location {
+            val fakeConfig = ConfigManager.getFakeLocation()
+            val baseLat = fakeConfig.latitude
+            val baseLng = fakeConfig.longitude
+            val baseAlt = fakeConfig.altitude
+
+            // 漂移：在上一次位置基础上微调，保持连续性
+            val wasInitialized = isInitialized
+            val latDrift = (ThreadLocalRandom.current().nextDouble() * 2 - 1) * MAX_OFFSET
+            val lngDrift = (ThreadLocalRandom.current().nextDouble() * 2 - 1) * MAX_OFFSET
+
+            val newLat: Double
+            val newLng: Double
+            if (!wasInitialized) {
+                // 首次使用基准坐标 + 小偏移
+                newLat = baseLat + latDrift
+                newLng = baseLng + lngDrift
+                isInitialized = true
+            } else {
+                // 后续在上一次位置上漂移
+                newLat = lastLatitude + latDrift * 0.3
+                newLng = lastLongitude + lngDrift * 0.3
+            }
+
+            // 限制漂移范围：距基准点不超过 50 米
+            val distFromBase = calculateDistance(baseLat, baseLng, newLat, newLng)
+            val clampedLat: Double
+            val clampedLng: Double
+            if (distFromBase > 50.0) {
+                val ratio = 45.0 / distFromBase
+                clampedLat = baseLat + (newLat - baseLat) * ratio
+                clampedLng = baseLng + (newLng - baseLng) * ratio
+            } else {
+                clampedLat = newLat
+                clampedLng = newLng
+            }
+
+            // 海拔变化
+            val altDrift = (ThreadLocalRandom.current().nextDouble() * 2 - 1) * ALTITUDE_DRIFT_MAX
+            val newAlt = if (!wasInitialized) baseAlt else lastAltitude + altDrift * 0.3
+
+            // 速度模拟：大部分时间静止，偶尔步行速度
+            val movementRoll = ThreadLocalRandom.current().nextFloat()
+            val newSpeed = when {
+                movementRoll < 0.7f -> {
+                    // 70% 概率静止
+                    ThreadLocalRandom.current().nextFloat() * SPEED_STILL_MAX
+                }
+                movementRoll < 0.95f -> {
+                    // 25% 概率步行
+                    SPEED_WALK_MIN + ThreadLocalRandom.current().nextFloat() * (SPEED_WALK_MAX - SPEED_WALK_MIN)
+                }
+                else -> {
+                    // 5% 概率快速移动
+                    2.0f + ThreadLocalRandom.current().nextFloat() * 3.0f
+                }
+            }
+
+            // 方向变化：在上一次方向基础上微调
+            val bearingDrift = (ThreadLocalRandom.current().nextFloat() * 2 - 1) * BEARING_DRIFT_MAX
+            val newBearing = if (!wasInitialized) {
+                ThreadLocalRandom.current().nextFloat() * 360f
+            } else {
+                ((lastBearing + bearingDrift) % 360f + 360f) % 360f
+            }
+
+            // 精度模拟
+            val accuracy = fakeConfig.accuracy + (ThreadLocalRandom.current().nextFloat() * 6 - 3f)
+
+            // 更新状态
+            lastLatitude = clampedLat
+            lastLongitude = clampedLng
+            lastAltitude = newAlt
+            lastBearing = newBearing
+            lastSpeed = newSpeed
+
+            // 记录历史
+            recordHistory(clampedLat, clampedLng, newAlt, newSpeed, newBearing)
+
+            return Location(LocationManager.GPS_PROVIDER).apply {
+                latitude = clampedLat
+                longitude = clampedLng
+                altitude = newAlt
+                speed = newSpeed
+                bearing = newBearing
+                this.accuracy = accuracy
+                time = System.currentTimeMillis()
+                elapsedRealtimeNanos = android.os.SystemClock.elapsedRealtimeNanos()
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+                    // 确保 hasElapsedRealtimeNanos() 返回 true
+                    try {
+                        val field = Location::class.java.getDeclaredField("mElapsedRealtimeNanos")
+                        field.isAccessible = true
+                        field.setLong(this, elapsedRealtimeNanos)
+                    } catch (_: Exception) {}
+                }
+
+                clearMockFlag()
+            }
+        }
+
+        /**
+         * 记录历史位置
+         */
+        private fun recordHistory(
+            lat: Double, lng: Double, alt: Double, speed: Float, bearing: Float
+        ) {
+            locationHistory.add(
+                LocationEntry(lat, lng, alt, speed, bearing, System.currentTimeMillis())
+            )
+            while (locationHistory.size > MAX_HISTORY_SIZE) {
+                locationHistory.removeAt(0)
+            }
+        }
+
+        /**
+         * 清除 Location 的 mock 标记
+         */
+        @SuppressLint("BlockedPrivateApi")
+        private fun Location.clearMockFlag() {
+            try {
+                val field = Location::class.java.getDeclaredField("mIsMock")
+                field.isAccessible = true
+                field.setBoolean(this, false)
+            } catch (_: Exception) {}
+        }
+
+        /**
+         * 计算两个坐标之间的距离（米），使用 Haversine 公式
+         */
+        private fun calculateDistance(
+            lat1: Double, lng1: Double, lat2: Double, lng2: Double
+        ): Double {
+            val earthRadius = 6371000.0
+            val dLat = Math.toRadians(lat2 - lat1)
+            val dLng = Math.toRadians(lng2 - lng1)
+            val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLng / 2) * Math.sin(dLng / 2)
+            val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+            return earthRadius * c
+        }
+
+        /**
+         * 重置状态（配置变更时调用）
+         */
+        fun reset() {
+            cachedLocation = null
+            lastCacheTime = 0L
+            isInitialized = false
+            locationHistory.clear()
+        }
     }
+
+    /**
+     * 历史轨迹数据条目
+     */
+    data class LocationEntry(
+        val latitude: Double,
+        val longitude: Double,
+        val altitude: Double,
+        val speed: Float,
+        val bearing: Float,
+        val timestamp: Long
+    )
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (!ConfigManager.isFakeLocationEnabled()) {
@@ -61,25 +326,21 @@ class LocationHooks : HookEntry.HookHandler {
             return
         }
 
-        // Hook 所有获取位置的方法
         hookGetLastLocation(locationManagerClass)
         hookGetLastKnownLocation(locationManagerClass)
         hookRequestLocationUpdates(locationManagerClass)
         hookCurrentLocation(locationManagerClass)
         hookGnssStatus(locationManagerClass)
 
-        // 隐藏模拟位置标记
         if (ConfigManager.isHideMockLocationEnabled()) {
             hookLocationClass(lpparam)
             hookMockLocationDetection(lpparam)
+            hookLocationProperties(lpparam)
         }
 
         HookUtils.log("$TAG: 位置伪造 Hook 注入完成")
     }
 
-    /**
-     * Hook getLastLocation
-     */
     private fun hookGetLastLocation(clazz: Class<*>) {
         HookUtils.hookMethodSafely(
             clazz.name, clazz.classLoader ?: return,
@@ -95,9 +356,6 @@ class LocationHooks : HookEntry.HookHandler {
         )
     }
 
-    /**
-     * Hook getLastKnownLocation(String)
-     */
     private fun hookGetLastKnownLocation(clazz: Class<*>) {
         try {
             XposedHelpers.findAndHookMethod(
@@ -118,13 +376,9 @@ class LocationHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook getCurrentLocation (Android 11+)
-     */
     private fun hookCurrentLocation(clazz: Class<*>) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
 
-        // 尝试不同的方法签名
         val signatures = listOf(
             arrayOf(
                 String::class.java,
@@ -179,9 +433,6 @@ class LocationHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook requestLocationUpdates - 立即回调一次伪造位置
-     */
     private fun hookRequestLocationUpdates(clazz: Class<*>) {
         try {
             XposedHelpers.findAndHookMethod(
@@ -198,7 +449,6 @@ class LocationHooks : HookEntry.HookHandler {
                         val listener = param.args[3] as android.location.LocationListener
                         val fakeLocation = getOrCreateFakeLocation()
 
-                        // 异步回调伪造位置
                         Thread {
                             try {
                                 Thread.sleep(100)
@@ -214,9 +464,6 @@ class LocationHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook GNSS 状态回调 - 阻止真实卫星数据
-     */
     private fun hookGnssStatus(clazz: Class<*>) {
         try {
             XposedHelpers.findAndHookMethod(
@@ -239,7 +486,7 @@ class LocationHooks : HookEntry.HookHandler {
     }
 
     /**
-     * Hook Location 类，隐藏 mock 标记
+     * Hook Location 类的基础 mock 标记
      */
     private fun hookLocationClass(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
@@ -247,7 +494,6 @@ class LocationHooks : HookEntry.HookHandler {
                 "android.location.Location", lpparam.classLoader
             )
 
-            // Hook isMock
             XposedHelpers.findAndHookMethod(
                 locationClass, "isMock",
                 object : XC_MethodReplacement() {
@@ -255,7 +501,6 @@ class LocationHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook isFromMockProvider (Android 12+)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 try {
                     XposedHelpers.findAndHookMethod(
@@ -274,8 +519,69 @@ class LocationHooks : HookEntry.HookHandler {
     }
 
     /**
-     * Hook 模拟位置检测（Settings.Secure）
+     * Hook Location 属性方法，确保伪造位置看起来真实：
+     * - getProvider 返回 "gps"
+     * - hasAltitude 返回 true
+     * - hasSpeed 返回 true（当 speed > 0）
+     * - hasBearing 返回 true（当 bearing 有效）
      */
+    private fun hookLocationProperties(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val locationClass = XposedHelpers.findClass(
+                "android.location.Location", lpparam.classLoader
+            )
+
+            // Hook getProvider：返回 "gps" 而非 "fused" 或 "network"
+            XposedHelpers.findAndHookMethod(
+                locationClass, "getProvider",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        return LocationManager.GPS_PROVIDER
+                    }
+                }
+            )
+
+            // Hook hasAltitude：始终返回 true
+            XposedHelpers.findAndHookMethod(
+                locationClass, "hasAltitude",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = true
+                }
+            )
+
+            // Hook hasSpeed：当 speed > 0 时返回 true
+            XposedHelpers.findAndHookMethod(
+                locationClass, "hasSpeed",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        val speed = (param.thisObject as Location).speed
+                        return speed > 0f
+                    }
+                }
+            )
+
+            // Hook hasBearing：始终返回 true
+            XposedHelpers.findAndHookMethod(
+                locationClass, "hasBearing",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = true
+                }
+            )
+
+            // Hook hasAccuracy：始终返回 true
+            XposedHelpers.findAndHookMethod(
+                locationClass, "hasAccuracy",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = true
+                }
+            )
+
+            HookUtils.log("$TAG: Location 属性 Hook 完成 (provider/hasAltitude/hasSpeed/hasBearing)")
+        } catch (e: Exception) {
+            HookUtils.log("$TAG: Location 属性 Hook 失败: ${e.message}")
+        }
+    }
+
     private fun hookMockLocationDetection(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val settingsSecureClass = XposedHelpers.findClass(
@@ -300,67 +606,6 @@ class LocationHooks : HookEntry.HookHandler {
         } catch (e: Exception) {
             HookUtils.log("$TAG: 模拟位置检测 Hook 失败: ${e.message}")
         }
-    }
-
-    /**
-     * 获取或创建伪造的 Location 对象（带 TTL 缓存）
-     */
-    private fun getOrCreateFakeLocation(): Location {
-        val now = System.currentTimeMillis()
-        val cached = cachedLocation
-
-        if (cached != null && (now - lastCacheTime) < CACHE_TTL_MS) {
-            return cached
-        }
-
-        val newLocation = createFakeLocation()
-        cachedLocation = newLocation
-        lastCacheTime = now
-        return newLocation
-    }
-
-    /**
-     * 创建伪造的 Location 对象
-     */
-    private fun createFakeLocation(): Location {
-        val fakeLocation = ConfigManager.getFakeLocation()
-
-        // 微小随机偏移，模拟 GPS 信号波动
-        val latOffset = MIN_OFFSET + random.nextDouble() * (MAX_OFFSET - MIN_OFFSET)
-        val lngOffset = MIN_OFFSET + random.nextDouble() * (MAX_OFFSET - MIN_OFFSET)
-
-        return Location(LocationManager.GPS_PROVIDER).apply {
-            latitude = fakeLocation.latitude + latOffset * if (random.nextBoolean()) 1 else -1
-            longitude = fakeLocation.longitude + lngOffset * if (random.nextBoolean()) 1 else -1
-            altitude = fakeLocation.altitude + (random.nextDouble() * 2 - 1)
-            speed = fakeLocation.speed
-            bearing = fakeLocation.bearing
-            accuracy = fakeLocation.accuracy + (random.nextFloat() * 5 - 2.5f)
-            time = System.currentTimeMillis()
-            elapsedRealtimeNanos = android.os.SystemClock.elapsedRealtimeNanos()
-
-            // 清除 mock 标记
-            clearMockFlag()
-        }
-    }
-
-    /**
-     * 清除 Location 的 mock 标记（通过反射）
-     */
-    @SuppressLint("BlockedPrivateApi")
-    private fun Location.clearMockFlag() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val field = Location::class.java.getDeclaredField("mFieldsMask")
-                field.isAccessible = true
-                val mask = field.getInt(this)
-                field.setInt(this, mask and 0x10.inv())
-            } else {
-                val field = Location::class.java.getDeclaredField("mIsMock")
-                field.isAccessible = true
-                field.setBoolean(this, false)
-            }
-        } catch (_: Exception) {}
     }
 
     private fun shouldHook(): Boolean {
