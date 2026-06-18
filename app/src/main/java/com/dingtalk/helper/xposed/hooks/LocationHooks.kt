@@ -1,5 +1,6 @@
 package com.dingtalk.helper.xposed.hooks
 
+import android.annotation.SuppressLint
 import android.location.GnssStatus
 import android.location.Location
 import android.location.LocationManager
@@ -346,6 +347,7 @@ class LocationHooks : HookEntry.HookHandler {
     /**
      * 清除 Location 的 mock 标记（通过反射）
      */
+    @SuppressLint("BlockedPrivateApi")
     private fun Location.clearMockFlag() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
