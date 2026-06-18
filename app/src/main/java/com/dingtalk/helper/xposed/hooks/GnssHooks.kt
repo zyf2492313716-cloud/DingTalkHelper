@@ -2,126 +2,100 @@ package com.dingtalk.helper.xposed.hooks
 
 import android.location.GnssClock
 import android.location.GnssMeasurement
-import android.location.GnssMeasurementsEvent
 import android.location.GnssStatus
-import android.location.Location
-import android.location.LocationManager
 import android.os.Build
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
+import com.dingtalk.helper.xposed.utils.Constants
+import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
-import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 
 /**
  * GNSS 卫星数据伪造 Hook
- * 借鉴 XposedFakeLocation 项目
- * 提供完整的 GPS 卫星数据以保持一致性
+ * 提供伪造的 GPS 卫星数据以保持一致性
+ *
+ * 借鉴 XposedFakeLocation 的 GNSS 伪造思路：
+ * - Hook GnssStatus 返回伪造的卫星数量和信号数据
+ * - 阻止 GNSS 测量数据回调避免泄露真实信息
+ * - 拦截导航消息回调
  */
 class GnssHooks : HookEntry.HookHandler {
 
     companion object {
-        private const val TAG = "${HookEntry.TAG}:GNSS"
+        private const val TAG = "${Constants.LOG_PREFIX}:GNSS"
 
         // 模拟的卫星配置
         private const val SATELLITE_COUNT = 12
-        private const val BASE_CN0 = 35.0f // 信噪比
-        private const val BASE_ELEVATION = 45.0f // 仰角
-        private const val BASE_AZIMUTH_STEP = 30.0f // 方位角间隔
+        private const val BASE_CN0 = 35.0f
+        private const val BASE_ELEVATION = 45.0f
+        private const val BASE_AZIMUTH_STEP = 30.0f
     }
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
-        XposedBridge.log("$TAG: 开始注入 GNSS 数据伪造 Hook")
+        if (!ConfigManager.isEnabled()) return
 
-        // Hook GnssStatus
+        HookUtils.log("$TAG: 开始注入 GNSS 数据伪造 Hook")
+
         hookGnssStatus(lpparam)
-
-        // Hook GnssMeasurementsEvent
         hookGnssMeasurements(lpparam)
-
-        // Hook GnssClock
-        hookGnssClock(lpparam)
-
-        // Hook GnssNavigationMessage
         hookGnssNavigationMessage(lpparam)
+
+        HookUtils.log("$TAG: GNSS Hook 注入完成")
     }
 
     /**
-     * Hook GnssStatus
-     * 提供伪造的卫星状态信息
+     * Hook GnssStatus - 返回伪造的卫星状态
      */
     private fun hookGnssStatus(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
-            // Hook GnssStatus.Callback
-            val callbackClass = XposedHelpers.findClass(
-                "android.location.GnssStatus\$Callback",
-                lpparam.classLoader
+            val gnssStatusClass = XposedHelpers.findClass(
+                "android.location.GnssStatus", lpparam.classLoader
             )
 
-            // Hook GnssManagerService
-            val gnssManagerClass = XposedHelpers.findClass(
-                "android.location.GnssStatus",
-                lpparam.classLoader
-            )
-
-            // Hook getSatelliteCount
+            // 卫星数量
             XposedHelpers.findAndHookMethod(
-                gnssManagerClass,
-                "getSatelliteCount",
+                gnssStatusClass, "getSatelliteCount",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = SATELLITE_COUNT
+                }
+            )
+
+            // 卫星编号
+            XposedHelpers.findAndHookMethod(
+                gnssStatusClass, "getSvid", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return SATELLITE_COUNT
+                        return (param.args[0] as Int) + 1
                     }
                 }
             )
 
-            // Hook getSvid (卫星编号)
+            // 信噪比
             XposedHelpers.findAndHookMethod(
-                gnssManagerClass,
-                "getSvid",
-                Int::class.java,
+                gnssStatusClass, "getCn0DbHz", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        val index = param.args[0] as Int
-                        return index + 1 // 返回 1-12 的卫星编号
-                    }
-                }
-            )
-
-            // Hook getCn0DbHz (信噪比)
-            XposedHelpers.findAndHookMethod(
-                gnssManagerClass,
-                "getCn0DbHz",
-                Int::class.java,
-                object : XC_MethodReplacement() {
-                    override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        val index = param.args[0] as Int
-                        // 返回带有随机噪声的信噪比
                         return BASE_CN0 + (Math.random() * 10 - 5).toFloat()
                     }
                 }
             )
 
-            // Hook getElevationDegrees (仰角)
+            // 仰角
             XposedHelpers.findAndHookMethod(
-                gnssManagerClass,
-                "getElevationDegrees",
-                Int::class.java,
+                gnssStatusClass, "getElevationDegrees", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        val index = param.args[0] as Int
                         return BASE_ELEVATION + (Math.random() * 30 - 15).toFloat()
                     }
                 }
             )
 
-            // Hook getAzimuthDegrees (方位角)
+            // 方位角
             XposedHelpers.findAndHookMethod(
-                gnssManagerClass,
-                "getAzimuthDegrees",
-                Int::class.java,
+                gnssStatusClass, "getAzimuthDegrees", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
                         val index = param.args[0] as Int
@@ -130,116 +104,79 @@ class GnssHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook usedInFix
+            // 是否用于定位（前8颗）
             XposedHelpers.findAndHookMethod(
-                gnssManagerClass,
-                "usedInFix",
-                Int::class.java,
+                gnssStatusClass, "usedInFix", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        // 前8颗卫星用于定位
-                        val index = param.args[0] as Int
-                        return index < 8
+                        return (param.args[0] as Int) < 8
                     }
                 }
             )
 
-            // Hook hasEphemerisData
+            // 星历数据
             XposedHelpers.findAndHookMethod(
-                gnssManagerClass,
-                "hasEphemerisData",
-                Int::class.java,
+                gnssStatusClass, "hasEphemerisData", Int::class.java,
                 object : XC_MethodReplacement() {
-                    override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return true
-                    }
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = true
                 }
             )
 
-            // Hook hasAlmanacData
+            // 年历数据
             XposedHelpers.findAndHookMethod(
-                gnssManagerClass,
-                "hasAlmanacData",
-                Int::class.java,
+                gnssStatusClass, "hasAlmanacData", Int::class.java,
                 object : XC_MethodReplacement() {
-                    override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return true
-                    }
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = true
                 }
             )
 
-            XposedBridge.log("$TAG: GnssStatus Hook 完成")
+            HookUtils.log("$TAG: GnssStatus Hook 完成")
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: GnssStatus Hook 失败: ${e.message}")
+            HookUtils.log("$TAG: GnssStatus Hook 失败: ${e.message}")
         }
     }
 
     /**
-     * Hook GnssMeasurementsEvent
-     * 提供伪造的 GNSS 测量数据
+     * Hook GnssMeasurementsEvent - 阻止真实测量数据
      */
     private fun hookGnssMeasurements(lpparam: XC_LoadPackage.LoadPackageParam) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+
         try {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
-                return
-            }
-
             val eventClass = XposedHelpers.findClass(
-                "android.location.GnssMeasurementsEvent",
-                lpparam.classLoader
+                "android.location.GnssMeasurementsEvent", lpparam.classLoader
             )
 
-            // Hook getMeasurements
+            // 返回空测量列表
             XposedHelpers.findAndHookMethod(
-                eventClass,
-                "getMeasurements",
+                eventClass, "getMeasurements",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        // 返回空列表或伪造的测量数据
                         param.result = emptyList<GnssMeasurement>()
-                        XposedBridge.log("$TAG: GnssMeasurementsEvent 已拦截")
                     }
                 }
             )
 
-            // Hook getClock
-            XposedHelpers.findAndHookMethod(
-                eventClass,
-                "getClock",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        // 返回伪造的时钟数据
-                        val clock = createFakeGnssClock()
-                        param.result = clock
-                        XposedBridge.log("$TAG: GnssClock 已替换")
-                    }
-                }
-            )
+            // Hook GnssClock
+            hookGnssClock(lpparam)
 
-            XposedBridge.log("$TAG: GnssMeasurementsEvent Hook 完成")
+            HookUtils.log("$TAG: GnssMeasurementsEvent Hook 完成")
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: GnssMeasurementsEvent Hook 失败: ${e.message}")
+            HookUtils.log("$TAG: GnssMeasurementsEvent Hook 失败: ${e.message}")
         }
     }
 
     /**
-     * Hook GnssClock
+     * Hook GnssClock - 返回合理的时间数据
      */
     private fun hookGnssClock(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
-                return
-            }
-
             val clockClass = XposedHelpers.findClass(
-                "android.location.GnssClock",
-                lpparam.classLoader
+                "android.location.GnssClock", lpparam.classLoader
             )
 
-            // Hook getTimeNanos
             XposedHelpers.findAndHookMethod(
-                clockClass,
-                "getTimeNanos",
+                clockClass, "getTimeNanos",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
                         return System.nanoTime()
@@ -247,49 +184,37 @@ class GnssHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook hasTimeUncertaintyNanos
             XposedHelpers.findAndHookMethod(
-                clockClass,
-                "hasTimeUncertaintyNanos",
+                clockClass, "hasTimeUncertaintyNanos",
                 object : XC_MethodReplacement() {
-                    override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return true
-                    }
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = true
                 }
             )
 
-            // Hook getTimeUncertaintyNanos
             XposedHelpers.findAndHookMethod(
-                clockClass,
-                "getTimeUncertaintyNanos",
+                clockClass, "getTimeUncertaintyNanos",
                 object : XC_MethodReplacement() {
-                    override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return 50.0 // 50 纳秒不确定度
-                    }
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = 50.0
                 }
             )
 
-            XposedBridge.log("$TAG: GnssClock Hook 完成")
+            HookUtils.log("$TAG: GnssClock Hook 完成")
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: GnssClock Hook 失败: ${e.message}")
+            HookUtils.log("$TAG: GnssClock Hook 失败: ${e.message}")
         }
     }
 
     /**
-     * Hook GnssNavigationMessage
+     * Hook GnssNavigationMessage - 阻止导航消息回调
      */
     private fun hookGnssNavigationMessage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        try {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
-                return
-            }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
 
+        try {
             val locationManagerClass = XposedHelpers.findClass(
-                "android.location.LocationManager",
-                lpparam.classLoader
+                "android.location.LocationManager", lpparam.classLoader
             )
 
-            // 阻止注册导航消息回调
             XposedHelpers.findAndHookMethod(
                 locationManagerClass,
                 "registerGnssNavigationMessageCallback",
@@ -297,47 +222,14 @@ class GnssHooks : HookEntry.HookHandler {
                 android.os.Handler::class.java,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        // 返回 false 表示注册失败
                         param.result = false
-                        XposedBridge.log("$TAG: GnssNavigationMessage 回调已阻止")
                     }
                 }
             )
 
-            XposedBridge.log("$TAG: GnssNavigationMessage Hook 完成")
+            HookUtils.log("$TAG: GnssNavigationMessage Hook 完成")
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: GnssNavigationMessage Hook 失败: ${e.message}")
-        }
-    }
-
-    /**
-     * 创建伪造的 GnssClock
-     */
-    private fun createFakeGnssClock(): Any? {
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                val clockClass = GnssClock::class.java
-                val constructor = clockClass.getDeclaredConstructor()
-                constructor.isAccessible = true
-                val clock = constructor.newInstance()
-
-                // 设置时间
-                val timeField = clockClass.getDeclaredField("mTimeNanos")
-                timeField.isAccessible = true
-                timeField.setLong(clock, System.nanoTime())
-
-                // 设置不确定度
-                val uncertaintyField = clockClass.getDeclaredField("mTimeUncertaintyNanos")
-                uncertaintyField.isAccessible = true
-                uncertaintyField.setDouble(clock, 50.0)
-
-                clock
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            XposedBridge.log("$TAG: 创建伪造 GnssClock 失败: ${e.message}")
-            null
+            HookUtils.log("$TAG: GnssNavigationMessage Hook 失败: ${e.message}")
         }
     }
 }

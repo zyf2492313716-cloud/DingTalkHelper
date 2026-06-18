@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Location pin icon -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,24C42.95,24 34,32.95 34,44C34,59.25 54,84 54,84C54,84 74,59.25 74,44C74,32.95 65.05,24 54,24ZM54,56C47.37,56 42,50.63 42,44C42,37.37 47.37,32 54,32C60.63,32 66,37.37 66,44C66,50.63 60.63,56 54,56Z" />
+    <!-- Shield icon overlay -->
+    <path
+        android:fillColor="#FF03DAC5"
+        android:pathData="M54,48L54,48C54,48 48,44 48,40L48,36C48,34.9 48.9,34 50,34L58,34C59.1,34 60,34.9 60,36L60,40C60,44 54,48 54,48Z"
+        android:strokeWidth="1"
+        android:strokeColor="#FFFFFFFF" />
+</vector>

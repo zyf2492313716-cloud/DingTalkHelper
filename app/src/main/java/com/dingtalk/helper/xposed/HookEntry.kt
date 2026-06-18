@@ -18,7 +18,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 class HookEntry : IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     companion object {
-        private const val TAG = Constants.LOG_PREFIX
+        const val TAG = Constants.LOG_PREFIX
 
         // 模块实例
         var instance: HookEntry? = null
