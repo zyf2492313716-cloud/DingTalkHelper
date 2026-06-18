@@ -6,6 +6,8 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
+import com.dingtalk.helper.xposed.utils.Constants
+import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedBridge
@@ -19,16 +21,16 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 class WifiHooks : HookEntry.HookHandler {
 
     companion object {
-        private const val TAG = "${HookEntry.TAG}:Wifi"
+        private const val TAG = "${Constants.LOG_PREFIX}:Wifi"
     }
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (!ConfigManager.isFakeWifiEnabled()) {
-            XposedBridge.log("$TAG: WiFi 伪造未启用，跳过")
+            HookUtils.logDebug("$TAG: WiFi 伪造未启用，跳过")
             return
         }
 
-        XposedBridge.log("$TAG: 开始注入 WiFi 伪造 Hook")
+        HookUtils.log("$TAG: 开始注入 WiFi 伪造 Hook")
 
         // Hook WifiManager
         hookWifiManager(lpparam)
@@ -56,21 +58,20 @@ class WifiHooks : HookEntry.HookHandler {
                 "getConnectionInfo",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (shouldHook(param)) {
+                        if (shouldHook()) {
                             val wifiInfo = param.result as? WifiInfo
                             if (wifiInfo != null) {
-                                val fakeWifiInfo = createFakeWifiInfo(wifiInfo)
-                                param.result = fakeWifiInfo
-                                XposedBridge.log("$TAG: getConnectionInfo 已替换")
+                                modifyWifiInfo(wifiInfo)
+                                HookUtils.logDebug("$TAG: getConnectionInfo 已替换")
                             }
                         }
                     }
                 }
             )
 
-            XposedBridge.log("$TAG: WifiManager Hook 完成")
+            HookUtils.log("$TAG: WifiManager Hook 完成")
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: WifiManager Hook 失败: ${e.message}")
+            HookUtils.log("$TAG: WifiManager Hook 失败: ${e.message}")
         }
     }
 
@@ -84,16 +85,15 @@ class WifiHooks : HookEntry.HookHandler {
                 lpparam.classLoader
             )
 
-            val fakeSSID = ConfigManager.getWifiSSID()
-            val fakeBSSID = ConfigManager.getWifiBSSID()
-
-            // Hook getSSID
+            // Hook getSSID - 动态读取配置，支持热更新
             XposedHelpers.findAndHookMethod(
                 wifiInfoClass,
                 "getSSID",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return "\"$fakeSSID\""
+                        val ssid = ConfigManager.getWifiSSID()
+                        return if (ssid.isNotEmpty()) "\"$ssid\"" else
+                            XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args)
                     }
                 }
             )
@@ -104,7 +104,9 @@ class WifiHooks : HookEntry.HookHandler {
                 "getBSSID",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return fakeBSSID
+                        val bssid = ConfigManager.getWifiBSSID()
+                        return if (bssid.isNotEmpty()) bssid else
+                            XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args)
                     }
                 }
             )
@@ -120,9 +122,9 @@ class WifiHooks : HookEntry.HookHandler {
                 }
             )
 
-            XposedBridge.log("$TAG: WifiInfo Hook 完成")
+            HookUtils.log("$TAG: WifiInfo Hook 完成")
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: WifiInfo Hook 失败: ${e.message}")
+            HookUtils.log("$TAG: WifiInfo Hook 失败: ${e.message}")
         }
     }
 
@@ -142,54 +144,55 @@ class WifiHooks : HookEntry.HookHandler {
                 "getScanResults",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (shouldHook(param)) {
+                        if (shouldHook()) {
                             val originalResults = param.result as? List<ScanResult>
                             val fakeResults = createFakeScanResults(originalResults)
                             param.result = fakeResults
-                            XposedBridge.log("$TAG: getScanResults 已替换")
+                            HookUtils.logDebug("$TAG: getScanResults 已替换")
                         }
                     }
                 }
             )
 
-            XposedBridge.log("$TAG: ScanResults Hook 完成")
+            HookUtils.log("$TAG: ScanResults Hook 完成")
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: ScanResults Hook 失败: ${e.message}")
+            HookUtils.log("$TAG: ScanResults Hook 失败: ${e.message}")
         }
     }
 
     /**
-     * 创建伪造的 WifiInfo
+     * 通过反射修改 WifiInfo 的字段
      */
-    private fun createFakeWifiInfo(original: WifiInfo): WifiInfo {
+    private fun modifyWifiInfo(wifiInfo: WifiInfo) {
         val fakeSSID = ConfigManager.getWifiSSID()
         val fakeBSSID = ConfigManager.getWifiBSSID()
 
-        // 通过反射修改 WifiInfo 的字段
         try {
-            val ssidField = WifiInfo::class.java.getDeclaredField("mSSID")
-            ssidField.isAccessible = true
-            ssidField.set(original, "\"$fakeSSID\"")
+            if (fakeSSID.isNotEmpty()) {
+                val ssidField = WifiInfo::class.java.getDeclaredField("mSSID")
+                ssidField.isAccessible = true
+                ssidField.set(wifiInfo, "\"$fakeSSID\"")
+            }
 
-            val bssidField = WifiInfo::class.java.getDeclaredField("mBSSID")
-            bssidField.isAccessible = true
-            bssidField.set(original, fakeBSSID)
+            if (fakeBSSID.isNotEmpty()) {
+                val bssidField = WifiInfo::class.java.getDeclaredField("mBSSID")
+                bssidField.isAccessible = true
+                bssidField.set(wifiInfo, fakeBSSID)
+            }
 
             // 隐藏 MAC 地址随机化标记
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 try {
                     val randomizedField = WifiInfo::class.java.getDeclaredField("mIsRandomizedMac")
                     randomizedField.isAccessible = true
-                    randomizedField.setBoolean(original, false)
+                    randomizedField.setBoolean(wifiInfo, false)
                 } catch (e: Exception) {
                     // 忽略
                 }
             }
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: 修改 WifiInfo 失败: ${e.message}")
+            HookUtils.logDebug("$TAG: 修改 WifiInfo 失败: ${e.message}")
         }
-
-        return original
     }
 
     /**
@@ -200,10 +203,12 @@ class WifiHooks : HookEntry.HookHandler {
         val fakeSSID = ConfigManager.getWifiSSID()
         val fakeBSSID = ConfigManager.getWifiBSSID()
 
-        // 检查是否已存在目标 WiFi
-        val exists = results.any { it.SSID == fakeSSID || it.BSSID == fakeBSSID }
+        if (fakeSSID.isEmpty()) return results
 
-        if (!exists && fakeSSID.isNotEmpty()) {
+        // 检查是否已存在目标 WiFi
+        val exists = results.any { it.SSID == fakeSSID || (fakeBSSID.isNotEmpty() && it.BSSID == fakeBSSID) }
+
+        if (!exists) {
             // 添加伪造的 WiFi 扫描结果
             val fakeScanResult = ScanResult().apply {
                 SSID = fakeSSID
@@ -222,9 +227,7 @@ class WifiHooks : HookEntry.HookHandler {
     /**
      * 判断是否需要 Hook
      */
-    private fun shouldHook(param: XC_MethodHook.MethodHookParam): Boolean {
-        if (!ConfigManager.isEnabled()) return false
-        if (!ConfigManager.isFakeWifiEnabled()) return false
-        return true
+    private fun shouldHook(): Boolean {
+        return ConfigManager.isEnabled() && ConfigManager.isFakeWifiEnabled()
     }
 }

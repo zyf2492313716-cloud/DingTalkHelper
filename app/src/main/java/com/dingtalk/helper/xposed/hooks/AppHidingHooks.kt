@@ -5,9 +5,10 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
+import com.dingtalk.helper.xposed.utils.Constants
+import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
-import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.io.File
@@ -16,119 +17,76 @@ import java.io.File
  * 应用列表隐藏 Hook
  * 借鉴 Hide-My-Applist 项目
  * 防止钉钉检测到虚拟定位相关应用
+ *
+ * 职责：
+ * - PackageManager 查询过滤
+ * - 文件系统路径隐藏
+ * - Intent 解析过滤
+ * - /proc 文件系统隐藏
  */
 class AppHidingHooks : HookEntry.HookHandler {
 
     companion object {
-        private const val TAG = "${HookEntry.TAG}:AppHiding"
-
-        // 需要隐藏的应用包名
-        private val HIDDEN_PACKAGES = setOf(
-            // 虚拟定位相关
-            "com.dingtalk.helper",
-            "com.noobexon.xposedfakelocation",
-            "com.ella.portal",
-            "com.github.fakelocation",
-            "com.csgo.fkgps",
-
-            // Xposed/LSPosed 相关
-            "org.lsposed.manager",
-            "de.robv.android.xposed.installer",
-            "org.meowcat.edxposed.manager",
-            "io.github.lsposed.manager",
-
-            // Magisk 相关
-            "com.topjohnwu.magisk",
-
-            // 分身应用相关
-            "com.lbe.parallel",
-            "io.virtualapp",
-            "com.excean.dualaid",
-            "com.ludashi.dualspace",
-            "com.parallel.space.lite"
-        )
-
-        // 需要隐藏的文件路径
-        private val HIDDEN_PATHS = setOf(
-            "/data/adb/magisk",
-            "/data/adb/modules",
-            "/data/adb/lspd",
-            "/data/misc/lspd",
-            "/data/data/org.lsposed.manager",
-            "/data/data/com.topjohnwu.magisk"
-        )
+        private const val TAG = "${Constants.LOG_PREFIX}:AppHiding"
     }
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
-        XposedBridge.log("$TAG: 开始注入应用列表隐藏 Hook")
+        HookUtils.log("$TAG: 开始注入应用列表隐藏 Hook")
 
-        // Hook PackageManager 查询
         hookPackageManager(lpparam)
-
-        // Hook 文件系统访问
         hookFileSystem(lpparam)
-
-        // Hook Intent 解析
         hookIntentResolution(lpparam)
-
-        // Hook /proc 文件系统
         hookProcFileSystem(lpparam)
     }
 
     /**
-     * Hook PackageManager 相关方法
+     * Hook PackageManager - 过滤已安装应用列表
      */
     private fun hookPackageManager(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val pmClass = XposedHelpers.findClass(
-                "android.app.ApplicationPackageManager",
-                lpparam.classLoader
+                "android.app.ApplicationPackageManager", lpparam.classLoader
             )
 
             // Hook getInstalledPackages
             XposedHelpers.findAndHookMethod(
-                pmClass,
-                "getInstalledPackages",
-                Int::class.java,
+                pmClass, "getInstalledPackages", Int::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val flags = param.args[0] as Int
-                        val packages = param.result as List<PackageInfo>
-                        param.result = filterPackages(packages)
-                        XposedBridge.log("$TAG: getInstalledPackages 已过滤")
+                        val packages = param.result as? List<*> ?: return
+                        param.result = packages.filter { pkg ->
+                            val pn = HookUtils.getFieldValueSafely(pkg!!, "packageName") as? String ?: ""
+                            pn !in Constants.HIDDEN_PACKAGES
+                        }
                     }
                 }
             )
 
             // Hook getInstalledApplications
             XposedHelpers.findAndHookMethod(
-                pmClass,
-                "getInstalledApplications",
-                Int::class.java,
+                pmClass, "getInstalledApplications", Int::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val apps = param.result as List<ApplicationInfo>
-                        param.result = filterApplications(apps)
-                        XposedBridge.log("$TAG: getInstalledApplications 已过滤")
+                        val apps = param.result as? List<*> ?: return
+                        param.result = apps.filter { app ->
+                            val pn = HookUtils.getFieldValueSafely(app!!, "packageName") as? String ?: ""
+                            pn !in Constants.HIDDEN_PACKAGES
+                        }
                     }
                 }
             )
 
             // Hook getPackageInfo (单个包查询)
             XposedHelpers.findAndHookMethod(
-                pmClass,
-                "getPackageInfo",
-                String::class.java,
-                Int::class.java,
+                pmClass, "getPackageInfo",
+                String::class.java, Int::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val packageName = param.args[0] as String
-                        if (HIDDEN_PACKAGES.contains(packageName)) {
-                            // 抛出 NameNotFoundException
+                        val packageName = param.args[0] as? String ?: return
+                        if (packageName in Constants.HIDDEN_PACKAGES) {
                             param.throwable = PackageManager.NameNotFoundException(
                                 "Package $packageName not found"
                             )
-                            XposedBridge.log("$TAG: 隐藏包查询: $packageName")
                         }
                     }
                 }
@@ -136,55 +94,48 @@ class AppHidingHooks : HookEntry.HookHandler {
 
             // Hook getApplicationInfo
             XposedHelpers.findAndHookMethod(
-                pmClass,
-                "getApplicationInfo",
-                String::class.java,
-                Int::class.java,
+                pmClass, "getApplicationInfo",
+                String::class.java, Int::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val packageName = param.args[0] as String
-                        if (HIDDEN_PACKAGES.contains(packageName)) {
+                        val packageName = param.args[0] as? String ?: return
+                        if (packageName in Constants.HIDDEN_PACKAGES) {
                             param.throwable = PackageManager.NameNotFoundException(
                                 "Package $packageName not found"
                             )
-                            XposedBridge.log("$TAG: 隐藏应用信息查询: $packageName")
                         }
                     }
                 }
             )
 
-            // Hook queryIntentActivities
+            // Hook queryIntentActivities - 过滤 Intent 查询结果
             XposedHelpers.findAndHookMethod(
-                pmClass,
-                "queryIntentActivities",
-                android.content.Intent::class.java,
-                Int::class.java,
+                pmClass, "queryIntentActivities",
+                android.content.Intent::class.java, Int::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val activities = param.result as List<*>
-                        param.result = activities.filter { activity ->
-                            val packageName = activity.javaClass
-                                .getDeclaredField("activityInfo")
-                                .apply { isAccessible = true }
-                                .get(activity)
-                                .javaClass
-                                .getDeclaredField("packageName")
-                                .apply { isAccessible = true }
-                                .get(activity) as String
-                            !HIDDEN_PACKAGES.contains(packageName)
+                        val activities = param.result as? List<*> ?: return
+                        param.result = activities.filter { resolveInfo ->
+                            try {
+                                val activityInfo = XposedHelpers.getObjectField(resolveInfo, "activityInfo")
+                                val pn = XposedHelpers.getObjectField(activityInfo, "packageName") as? String ?: ""
+                                pn !in Constants.HIDDEN_PACKAGES
+                            } catch (_: Exception) {
+                                true // 保留无法判断的
+                            }
                         }
                     }
                 }
             )
 
-            XposedBridge.log("$TAG: PackageManager Hook 完成")
+            HookUtils.log("$TAG: PackageManager Hook 完成")
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: PackageManager Hook 失败: ${e.message}")
+            HookUtils.log("$TAG: PackageManager Hook 失败: ${e.message}")
         }
     }
 
     /**
-     * Hook 文件系统访问
+     * Hook 文件系统 - 隐藏敏感路径
      */
     private fun hookFileSystem(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
@@ -192,33 +143,25 @@ class AppHidingHooks : HookEntry.HookHandler {
 
             // Hook listFiles
             XposedHelpers.findAndHookMethod(
-                fileClass,
-                "listFiles",
+                fileClass, "listFiles",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val dir = (param.thisObject as File).absolutePath
-                        val files = param.result as? Array<File> ?: return
+                        if (!shouldFilterDirectory(dir)) return
 
-                        // 过滤隐藏路径下的文件
-                        if (shouldFilterDirectory(dir)) {
-                            param.result = files.filter { file ->
-                                !shouldHideFile(file.absolutePath)
-                            }.toTypedArray()
-                        }
+                        val files = param.result as? Array<File> ?: return
+                        param.result = files.filter { !shouldHideFile(it.absolutePath) }.toTypedArray()
                     }
                 }
             )
 
             // Hook exists
             XposedHelpers.findAndHookMethod(
-                fileClass,
-                "exists",
+                fileClass, "exists",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
                         val path = (param.thisObject as File).absolutePath
-                        if (shouldHideFile(path)) {
-                            return false
-                        }
+                        if (shouldHideFile(path)) return false
                         return XposedBridge.invokeOriginalMethod(
                             param.method, param.thisObject, param.args
                         )
@@ -226,9 +169,9 @@ class AppHidingHooks : HookEntry.HookHandler {
                 }
             )
 
-            XposedBridge.log("$TAG: 文件系统 Hook 完成")
+            HookUtils.log("$TAG: 文件系统 Hook 完成")
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: 文件系统 Hook 失败: ${e.message}")
+            HookUtils.log("$TAG: 文件系统 Hook 失败: ${e.message}")
         }
     }
 
@@ -238,103 +181,85 @@ class AppHidingHooks : HookEntry.HookHandler {
     private fun hookIntentResolution(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val intentClass = XposedHelpers.findClass(
-                "android.content.Intent",
-                lpparam.classLoader
+                "android.content.Intent", lpparam.classLoader
             )
 
-            // Hook resolveActivity
             XposedHelpers.findAndHookMethod(
-                intentClass,
-                "resolveActivity",
+                intentClass, "resolveActivity",
                 PackageManager::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val result = param.result
-                        if (result != null) {
-                            val packageName = result.javaClass
-                                .getDeclaredField("packageName")
-                                .apply { isAccessible = true }
-                                .get(result) as String
-                            if (HIDDEN_PACKAGES.contains(packageName)) {
+                        val result = param.result ?: return
+                        try {
+                            val pn = XposedHelpers.getObjectField(result, "packageName") as? String ?: ""
+                            if (pn in Constants.HIDDEN_PACKAGES) {
                                 param.result = null
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+
+            HookUtils.log("$TAG: Intent 解析 Hook 完成")
+        } catch (e: Exception) {
+            HookUtils.log("$TAG: Intent 解析 Hook 失败: ${e.message}")
+        }
+    }
+
+    /**
+     * Hook /proc 文件系统 - 过滤 Xposed/Magisk 库路径
+     */
+    private fun hookProcFileSystem(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val readerClass = XposedHelpers.findClass(
+                "java.io.BufferedReader", lpparam.classLoader
+            )
+
+            // 使用计数器防止无限递归
+            val readingCounter = ThreadLocal<Int>()
+
+            XposedHelpers.findAndHookMethod(
+                readerClass, "readLine",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val counter = readingCounter.get() ?: 0
+                        if (counter > 0) return // 防止递归
+
+                        val line = param.result as? String ?: return
+                        if (line.contains("lsposed", ignoreCase = true) ||
+                            line.contains("xposed", ignoreCase = true) ||
+                            line.contains("magisk", ignoreCase = true) ||
+                            line.contains("riru", ignoreCase = true)) {
+
+                            readingCounter.set(counter + 1)
+                            try {
+                                param.result = XposedBridge.invokeOriginalMethod(
+                                    param.method, param.thisObject, param.args
+                                )
+                            } finally {
+                                readingCounter.set(counter)
                             }
                         }
                     }
                 }
             )
 
-            XposedBridge.log("$TAG: Intent 解析 Hook 完成")
+            HookUtils.log("$TAG: /proc 文件系统 Hook 完成")
         } catch (e: Exception) {
-            XposedBridge.log("$TAG: Intent 解析 Hook 失败: ${e.message}")
+            HookUtils.log("$TAG: /proc 文件系统 Hook 失败: ${e.message}")
         }
     }
 
-    /**
-     * Hook /proc 文件系统
-     * 隐藏进程信息
-     */
-    private fun hookProcFileSystem(lpparam: XC_LoadPackage.LoadPackageParam) {
-        try {
-            // Hook BufferedReader 读取 /proc/self/maps
-            val readerClass = XposedHelpers.findClass(
-                "java.io.BufferedReader",
-                lpparam.classLoader
-            )
+    // ==================== 工具方法 ====================
 
-            XposedHelpers.findAndHookMethod(
-                readerClass,
-                "readLine",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val line = param.result as? String ?: return
-                        // 过滤 Xposed/Magisk 相关的库路径
-                        if (line.contains("lsposed") ||
-                            line.contains("xposed") ||
-                            line.contains("magisk") ||
-                            line.contains("riru")) {
-                            // 跳过这行，读取下一行
-                            param.result = XposedBridge.invokeOriginalMethod(
-                                param.method, param.thisObject, param.args
-                            )
-                        }
-                    }
-                }
-            )
-
-            XposedBridge.log("$TAG: /proc 文件系统 Hook 完成")
-        } catch (e: Exception) {
-            XposedBridge.log("$TAG: /proc 文件系统 Hook 失败: ${e.message}")
-        }
-    }
-
-    /**
-     * 过滤包列表
-     */
-    private fun filterPackages(packages: List<PackageInfo>): List<PackageInfo> {
-        return packages.filter { !HIDDEN_PACKAGES.contains(it.packageName) }
-    }
-
-    /**
-     * 过滤应用列表
-     */
-    private fun filterApplications(apps: List<ApplicationInfo>): List<ApplicationInfo> {
-        return apps.filter { !HIDDEN_PACKAGES.contains(it.packageName) }
-    }
-
-    /**
-     * 判断是否应该过滤目录
-     */
     private fun shouldFilterDirectory(dir: String): Boolean {
-        return dir.contains("/data/data") ||
-               dir.contains("/data/adb") ||
-               dir.contains("/data/misc")
+        return dir.startsWith("/data/data") ||
+               dir.startsWith("/data/adb") ||
+               dir.startsWith("/data/misc")
     }
 
-    /**
-     * 判断是否应该隐藏文件
-     */
     private fun shouldHideFile(path: String): Boolean {
-        return HIDDEN_PACKAGES.any { path.contains(it) } ||
-               HIDDEN_PATHS.any { path.startsWith(it) }
+        return Constants.HIDDEN_PACKAGES.any { path.contains(it) } ||
+               Constants.HIDDEN_PATH_PREFIXES.any { path.startsWith(it) }
     }
 }
