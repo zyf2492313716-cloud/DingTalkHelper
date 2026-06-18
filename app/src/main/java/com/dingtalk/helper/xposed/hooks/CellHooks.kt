@@ -128,26 +128,34 @@ class CellHooks : HookEntry.HookHandler {
 
         // 创建 GSM 基站信息
         try {
-            val cellIdentityGsm = CellIdentityGsm(cellId, lac, mcc, mnc)
-            val cellInfoGsm = CellInfoGsm().apply {
-                setCellIdentity(cellIdentityGsm)
-                setRegistered(true)
-                setTimestamp(timestamp)
-            }
-            cellInfoList.add(cellInfoGsm)
+            val cellIdentityGsm = XposedHelpers.newInstance(
+                Class.forName("android.telephony.CellIdentityGsm"),
+                cellId, lac, mcc, mnc
+            )
+            val cellInfoGsm = XposedHelpers.newInstance(
+                Class.forName("android.telephony.CellInfoGsm")
+            )
+            XposedHelpers.callMethod(cellInfoGsm, "setCellIdentity", cellIdentityGsm)
+            XposedHelpers.callMethod(cellInfoGsm, "setRegistered", true)
+            XposedHelpers.callMethod(cellInfoGsm, "setTimestamp", timestamp)
+            cellInfoList.add(cellInfoGsm as CellInfo)
         } catch (e: Exception) {
             HookUtils.logDebug("$TAG: 创建 GSM CellInfo 失败: ${e.message}")
         }
 
         // 创建 LTE 基站信息
         try {
-            val cellIdentityLte = CellIdentityLte(cellId, 0, 0, mcc, mnc)
-            val cellInfoLte = CellInfoLte().apply {
-                setCellIdentity(cellIdentityLte)
-                setRegistered(true)
-                setTimestamp(timestamp)
-            }
-            cellInfoList.add(cellInfoLte)
+            val cellIdentityLte = XposedHelpers.newInstance(
+                Class.forName("android.telephony.CellIdentityLte"),
+                cellId, 0, 0, mcc, mnc
+            )
+            val cellInfoLte = XposedHelpers.newInstance(
+                Class.forName("android.telephony.CellInfoLte")
+            )
+            XposedHelpers.callMethod(cellInfoLte, "setCellIdentity", cellIdentityLte)
+            XposedHelpers.callMethod(cellInfoLte, "setRegistered", true)
+            XposedHelpers.callMethod(cellInfoLte, "setTimestamp", timestamp)
+            cellInfoList.add(cellInfoLte as CellInfo)
         } catch (e: Exception) {
             HookUtils.logDebug("$TAG: 创建 LTE CellInfo 失败: ${e.message}")
         }
@@ -162,7 +170,10 @@ class CellHooks : HookEntry.HookHandler {
         return try {
             val cellId = ConfigManager.getCellId()
             val lac = ConfigManager.getLac()
-            listOf(NeighboringCellInfo(lac, cellId, "GSM"))
+            // NeighboringCellInfo is deprecated, use reflection for compatibility
+            val clazz = Class.forName("android.telephony.NeighboringCellInfo")
+            val obj = XposedHelpers.newInstance(clazz, lac, cellId, "GSM")
+            listOf(obj as NeighboringCellInfo)
         } catch (e: Exception) {
             HookUtils.logDebug("$TAG: 创建邻区信息失败: ${e.message}")
             emptyList()

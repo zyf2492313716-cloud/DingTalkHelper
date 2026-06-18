@@ -68,7 +68,7 @@ class HookEntry : IXposedHookLoadPackage, IXposedHookZygoteInit {
             return
         }
 
-        HookUtils.log("$TAG: 检测到钉钉应用加载 (v${lpparam.appInfo?.versionName ?: "unknown"})")
+        HookUtils.log("$TAG: 检测到钉钉应用加载")
 
         // 重置统计
         hookSuccessCount = 0
