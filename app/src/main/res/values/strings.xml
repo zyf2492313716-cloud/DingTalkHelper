@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">钉钉助手</string>
+    <string name="module_status">模块状态</string>
+    <string name="module_active">已激活</string>
+    <string name="module_inactive">未激活</string>
+    <string name="settings">设置</string>
+    <string name="fake_location_enable">启用虚拟定位</string>
+    <string name="fake_location_latitude">纬度</string>
+    <string name="fake_location_longitude">经度</string>
+    <string name="fake_wifi_enable">启用WiFi伪造</string>
+    <string name="fake_wifi_ssid">WiFi名称</string>
+    <string name="fake_wifi_bssid">WiFi MAC地址</string>
+    <string name="fake_cell_enable">启用基站伪造</string>
+    <string name="hide_root">隐藏ROOT环境</string>
+    <string name="hide_xposed">隐藏Xposed框架</string>
+    <string name="hide_mock_location">隐藏模拟位置标记</string>
+    <string name="save">保存</string>
+    <string name="reset">重置</string>
+</resources>
