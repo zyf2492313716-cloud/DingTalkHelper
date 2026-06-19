@@ -181,25 +181,8 @@ class RiskControlHooks : HookEntry.HookHandler {
                 "android.telephony.TelephonyManager", classLoader
             )
             for (method in listOf("getDeviceId", "getImei", "getSubscriberId", "getSimSerialNumber")) {
-                hookMethodReturnString(telephonyClass, method, "862123456789012")
+                hookMethodReturnString(telephonyClass, method, EmulatorHooks.getRandomIMEI())
             }
-        } catch (_: Exception) {}
-
-        try {
-            val secureClass = XposedHelpers.findClass("android.provider.Settings\$Secure", classLoader)
-            XposedHelpers.findAndHookMethod(
-                secureClass, "getString",
-                android.content.ContentResolver::class.java, String::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val key = param.args[1] as? String ?: return
-                        when (key) {
-                            "android_id" -> param.result = "a1b2c3d4e5f67890"
-                            "bluetooth_address" -> param.result = "02:00:00:00:00:00"
-                        }
-                    }
-                }
-            )
         } catch (_: Exception) {}
 
         try {
@@ -220,19 +203,19 @@ class RiskControlHooks : HookEntry.HookHandler {
             val buildClass = XposedHelpers.findClass("android.os.Build", classLoader)
 
             val stringFields = mapOf(
-                "FINGERPRINT" to "google/raven/raven:13/TP1A.220624.014/8819057:user/release-keys",
-                "DISPLAY" to "TP1A.220624.014",
-                "HOST" to "abfarm-02",
+                "FINGERPRINT" to EmulatorHooks.getDeviceFingerprint(),
+                "DISPLAY" to EmulatorHooks.getDeviceDisplay(),
+                "HOST" to "SRPXG000000",
                 "TAGS" to "release-keys",
                 "TYPE" to "user",
-                "USER" to "android-build",
-                "MODEL" to "Pixel 6",
-                "MANUFACTURER" to "Google",
-                "BRAND" to "google",
-                "PRODUCT" to "raven",
-                "DEVICE" to "raven",
-                "BOARD" to "raven",
-                "HARDWARE" to "raven"
+                "USER" to "dpi",
+                "MODEL" to EmulatorHooks.getDeviceModel(),
+                "MANUFACTURER" to EmulatorHooks.getDeviceManufacturer(),
+                "BRAND" to EmulatorHooks.getDeviceBrand(),
+                "PRODUCT" to EmulatorHooks.getDeviceProduct(),
+                "DEVICE" to EmulatorHooks.getDeviceDevice(),
+                "BOARD" to EmulatorHooks.getDeviceBoard(),
+                "HARDWARE" to EmulatorHooks.getDeviceHardware()
             )
 
             for ((field, value) in stringFields) {
@@ -244,8 +227,8 @@ class RiskControlHooks : HookEntry.HookHandler {
 
         try {
             val buildVersionClass = XposedHelpers.findClass("android.os.Build\$VERSION", classLoader)
-            XposedHelpers.setStaticObjectField(buildVersionClass, "RELEASE", "13")
-            XposedHelpers.setStaticObjectField(buildVersionClass, "INCREMENTAL", "8819057")
+            XposedHelpers.setStaticObjectField(buildVersionClass, "RELEASE", EmulatorHooks.getDeviceRelease())
+            XposedHelpers.setStaticObjectField(buildVersionClass, "INCREMENTAL", EmulatorHooks.getDeviceIncremental())
         } catch (_: Exception) {}
     }
 
@@ -593,8 +576,9 @@ class RiskControlHooks : HookEntry.HookHandler {
                 param.result = mutableMap
             }
             is List<*> -> {
-                val list = result as MutableList<Any>
-                tamperListRecursive(list)
+                val mutableList = ArrayList(result)
+                tamperListRecursive(mutableList as MutableList<Any>)
+                param.result = mutableList
             }
             is Collection<*> -> {
                 try {
@@ -657,8 +641,8 @@ class RiskControlHooks : HookEntry.HookHandler {
         result = result.replace("\"multOpen\":true", "\"multOpen\":false")
         result = result.replace("\"dualApp\":true", "\"dualApp\":false")
         result = result.replace("\"tampered\":true", "\"tampered\":false")
-        result = result.replace(Regex("\"riskScore\":[0-9]+"), "\"riskScore\":0")
-        result = result.replace(Regex("\"riskLevel\":[0-9]+"), "\"riskLevel\":0")
+        result = result.replace(Regex("\"riskScore\":[0-9]+")) { "\"riskScore\":${(1..10).random()}" }
+        result = result.replace(Regex("\"riskLevel\":[0-9]+")) { "\"riskLevel\":\"${listOf("low", "normal").random()}\"" }
         return result
     }
 
@@ -671,13 +655,15 @@ class RiskControlHooks : HookEntry.HookHandler {
             val value = entry.value
 
             if (RISK_CONTROL_KEYS.contains(key)) {
-                when (value) {
-                    is Boolean -> entry.setValue(false)
-                    is Int -> entry.setValue(0)
-                    is Long -> entry.setValue(0L)
-                    is Float -> entry.setValue(0f)
-                    is Double -> entry.setValue(0.0)
-                    is String -> {
+                when {
+                    key == "riskscore" -> entry.setValue((1..10).random())
+                    key == "risklevel" -> entry.setValue(listOf("low", "normal").random())
+                    value is Boolean -> entry.setValue(false)
+                    value is Int -> entry.setValue(0)
+                    value is Long -> entry.setValue(0L)
+                    value is Float -> entry.setValue(0f)
+                    value is Double -> entry.setValue(0.0)
+                    value is String -> {
                         if (value.equals("true", true)) {
                             entry.setValue("false")
                         } else if (value.equals("1")) {
@@ -770,30 +756,30 @@ class RiskControlHooks : HookEntry.HookHandler {
 
     private fun getFakeValueForMethod(methodName: String): String {
         return when (methodName.lowercase()) {
-            "getdeviceid", "deviceid" -> "862123456789012"
-            "getimei", "imei" -> "862123456789012"
-            "getimsi", "imsi" -> "460001234567890"
-            "getandroidid", "androidid" -> "a1b2c3d4e5f67890"
-            "getserialnumber", "serial" -> "R5CR123456"
+            "getdeviceid", "deviceid" -> EmulatorHooks.getRandomIMEI()
+            "getimei", "imei" -> EmulatorHooks.getRandomIMEI()
+            "getimsi", "imsi" -> EmulatorHooks.getRandomIMSI()
+            "getandroidid", "androidid" -> EmulatorHooks.getRandomAndroidID()
+            "getserialnumber", "serial" -> EmulatorHooks.getRandomSerial()
             "getmacaddress", "mac", "macaddress", "wifimac" -> "02:00:00:00:00:00"
             "getbluetoothmac", "bluetoothmac" -> "02:00:00:00:00:00"
             "getadvertisingid", "advertisingid" -> "00000000-0000-0000-0000-000000000000"
             "getoaid", "oaid" -> "00000000-0000-0000-0000-000000000000"
-            "getua", "ua" -> "Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36"
+            "getua", "ua" -> "Mozilla/5.0 (Linux; Android ${EmulatorHooks.getDeviceRelease()}; ${EmulatorHooks.getDeviceModel()}) AppleWebKit/537.36"
             else -> ""
         }
     }
 
     private fun getFakeBuildProp(key: String): String {
         return when (key.lowercase()) {
-            "model" -> "Pixel 6"
-            "device" -> "raven"
-            "brand" -> "google"
-            "manufacturer" -> "Google"
-            "fingerprint" -> "google/raven/raven:13/TP1A.220624.014/8819057:user/release-keys"
-            "build" -> "TP1A.220624.014"
-            "hardware" -> "raven"
-            "board" -> "raven"
+            "model" -> EmulatorHooks.getDeviceModel()
+            "device" -> EmulatorHooks.getDeviceDevice()
+            "brand" -> EmulatorHooks.getDeviceBrand()
+            "manufacturer" -> EmulatorHooks.getDeviceManufacturer()
+            "fingerprint" -> EmulatorHooks.getDeviceFingerprint()
+            "build" -> EmulatorHooks.getDeviceDisplay()
+            "hardware" -> EmulatorHooks.getDeviceHardware()
+            "board" -> EmulatorHooks.getDeviceBoard()
             else -> ""
         }
     }

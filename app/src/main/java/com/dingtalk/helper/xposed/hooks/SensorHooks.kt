@@ -10,6 +10,7 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -31,14 +32,9 @@ class SensorHooks : HookEntry.HookHandler {
         private const val WALK_FREQ_HZ = 2.0
         private const val TWO_PI = 6.2831853f
 
-        // 呼吸/心跳微小变化频率
-        private const val BREATH_FREQ_HZ = 0.25
-        private const val HEARTBEAT_FREQ_HZ = 1.2
-        private const val BREATH_AMPLITUDE = 0.005f
-        private const val HEARTBEAT_AMPLITUDE = 0.002f
-
-        // 地球磁场垂直分量 (微特斯拉)，中国地区参考值
         private const val MAG_DOWN_BASE = -42.0f
+
+        private const val PRESSURE_BASE = 1013.25f
 
         // 传感器类型到修改器的映射
         private val sensorModifiers = ConcurrentHashMap<Int, (FloatArray, Long) -> FloatArray>()
@@ -169,72 +165,83 @@ class SensorHooks : HookEntry.HookHandler {
                 sensorModifiers[sensorType] = ::modifyMagneticField
                 HookUtils.logDebug("$TAG: 注册磁力计修改器")
             }
+            Sensor.TYPE_GRAVITY -> {
+                sensorModifiers[sensorType] = ::modifyGravity
+                HookUtils.logDebug("$TAG: 注册重力传感器修改器")
+            }
+            Sensor.TYPE_LINEAR_ACCELERATION -> {
+                sensorModifiers[sensorType] = ::modifyLinearAcceleration
+                HookUtils.logDebug("$TAG: 注册线性加速度修改器")
+            }
+            Sensor.TYPE_PRESSURE -> {
+                sensorModifiers[sensorType] = ::modifyPressure
+                HookUtils.logDebug("$TAG: 注册气压计修改器")
+            }
         }
     }
 
     private fun isMoving(): Boolean {
         return try {
-            ConfigManager.getFakeLocation().speed > 0f
+            LocationHooks.getCurrentFakeLocation().speed > 0.5f
+        } catch (_: Exception) { false }
+    }
+
+    private fun getSpeed(): Float {
+        return try {
+            LocationHooks.getCurrentFakeLocation().speed
         } catch (_: Exception) {
-            false
+            0f
         }
     }
 
     private fun getBearing(): Float {
         return try {
-            ConfigManager.getFakeLocation().bearing
+            LocationHooks.getCurrentFakeLocation().bearing
         } catch (_: Exception) {
             0f
         }
     }
 
     private fun modifyAccelerometer(values: FloatArray, timestamp: Long): FloatArray {
-        val t = timestamp / 1_000_000_000.0f
+        val t = (timestamp % 1_000_000_000) / 1_000_000_000.0f + (timestamp / 1_000_000_000).toFloat()
         val result = FloatArray(3)
 
         if (isMoving()) {
             val walkPhase = (t * WALK_FREQ_HZ * TWO_PI).toDouble()
             val walkSin = sin(walkPhase).toFloat()
+            val speedFactor = (getSpeed() / 3.0f).coerceIn(0.5f, 2.0f)
 
-            result[0] = (ACCEL_WALK_AMPLITUDE * 0.3f * walkSin +
+            result[0] = (ACCEL_WALK_AMPLITUDE * 0.3f * walkSin * speedFactor +
                     gaussianNoise(ACCEL_STATIC_NOISE * 0.5f))
-            result[1] = (ACCEL_WALK_AMPLITUDE * 0.15f * sin(walkPhase * 0.7).toFloat() +
+            result[1] = (ACCEL_WALK_AMPLITUDE * 0.15f * sin(walkPhase * 0.7).toFloat() * speedFactor +
                     gaussianNoise(ACCEL_STATIC_NOISE * 0.5f))
-            result[2] = (GRAVITY + ACCEL_WALK_AMPLITUDE * 0.5f * sin(walkPhase * 2).toFloat() +
+            result[2] = (GRAVITY + ACCEL_WALK_AMPLITUDE * 0.5f * sin(walkPhase * 2).toFloat() * speedFactor +
                     gaussianNoise(ACCEL_STATIC_NOISE * 0.5f))
         } else {
-            val breathPhase = (t * BREATH_FREQ_HZ * TWO_PI).toDouble()
-            val heartPhase = (t * HEARTBEAT_FREQ_HZ * TWO_PI).toDouble()
-
-            val breathX = (BREATH_AMPLITUDE * sin(breathPhase)).toFloat()
-            val breathY = (BREATH_AMPLITUDE * sin(breathPhase + 1.57)).toFloat()
-            val heartZ = (HEARTBEAT_AMPLITUDE * sin(heartPhase)).toFloat()
-
-            result[0] = breathX + gaussianNoise(ACCEL_STATIC_NOISE)
-            result[1] = breathY + gaussianNoise(ACCEL_STATIC_NOISE)
-            result[2] = GRAVITY + heartZ + gaussianNoise(ACCEL_STATIC_NOISE)
+            result[0] = gaussianNoise(ACCEL_STATIC_NOISE)
+            result[1] = gaussianNoise(ACCEL_STATIC_NOISE)
+            result[2] = GRAVITY + gaussianNoise(ACCEL_STATIC_NOISE)
         }
 
         return result
     }
 
     private fun modifyGyroscope(values: FloatArray, timestamp: Long): FloatArray {
-        val t = timestamp / 1_000_000_000.0f
+        val t = (timestamp % 1_000_000_000) / 1_000_000_000.0f + (timestamp / 1_000_000_000).toFloat()
         val result = FloatArray(3)
 
         if (isMoving()) {
             val walkPhase = (t * WALK_FREQ_HZ * TWO_PI).toDouble()
+            val speedFactor = (getSpeed() / 3.0f).coerceIn(0.5f, 2.0f)
 
-            result[0] = (GYRO_WALK_AMPLITUDE * sin(walkPhase * 0.8).toFloat() +
+            result[0] = (GYRO_WALK_AMPLITUDE * sin(walkPhase * 0.8).toFloat() * speedFactor +
                     gaussianNoise(GYRO_STATIC_NOISE))
-            result[1] = (GYRO_WALK_AMPLITUDE * 0.5f * cos(walkPhase).toFloat() +
+            result[1] = (GYRO_WALK_AMPLITUDE * 0.5f * cos(walkPhase).toFloat() * speedFactor +
                     gaussianNoise(GYRO_STATIC_NOISE))
             result[2] = gaussianNoise(GYRO_STATIC_NOISE * 1.5f)
         } else {
-            val drift = (t * 0.0001f) % 0.0005f
-
-            result[0] = gaussianNoise(GYRO_STATIC_NOISE) + drift * sin(t * 0.3).toFloat()
-            result[1] = gaussianNoise(GYRO_STATIC_NOISE) + drift * cos(t * 0.5).toFloat()
+            result[0] = gaussianNoise(GYRO_STATIC_NOISE)
+            result[1] = gaussianNoise(GYRO_STATIC_NOISE)
             result[2] = gaussianNoise(GYRO_STATIC_NOISE)
         }
 
@@ -262,15 +269,70 @@ class SensorHooks : HookEntry.HookHandler {
 
     private fun getMagneticDeclination(): Float {
         return try {
-            val lat = ConfigManager.getLatitude()
             val lon = ConfigManager.getLongitude()
-            ((lon * 0.01 + lat * 0.005) % 360.0).toFloat() * 0.01745f
+            Math.toRadians(-0.15 * lon).toFloat()
         } catch (_: Exception) {
             0.1f
         }
     }
 
     private fun gaussianNoise(amplitude: Float): Float {
-        return ((Math.random() + Math.random() + Math.random() - 1.5) * 0.667 * amplitude).toFloat()
+        return (ThreadLocalRandom.current().nextGaussian() * amplitude).toFloat()
+    }
+
+    private fun modifyGravity(values: FloatArray, timestamp: Long): FloatArray {
+        val result = FloatArray(3)
+
+        if (isMoving()) {
+            val t = (timestamp % 1_000_000_000) / 1_000_000_000.0f + (timestamp / 1_000_000_000).toFloat()
+            val walkPhase = (t * WALK_FREQ_HZ * TWO_PI).toDouble()
+            val speedFactor = (getSpeed() / 3.0f).coerceIn(0.5f, 2.0f)
+
+            result[0] = gaussianNoise(ACCEL_STATIC_NOISE * 0.3f)
+            result[1] = gaussianNoise(ACCEL_STATIC_NOISE * 0.3f)
+            result[2] = GRAVITY + ACCEL_WALK_AMPLITUDE * 0.2f * sin(walkPhase).toFloat() * speedFactor +
+                    gaussianNoise(ACCEL_STATIC_NOISE * 0.3f)
+        } else {
+            result[0] = gaussianNoise(ACCEL_STATIC_NOISE * 0.2f)
+            result[1] = gaussianNoise(ACCEL_STATIC_NOISE * 0.2f)
+            result[2] = GRAVITY + gaussianNoise(ACCEL_STATIC_NOISE * 0.2f)
+        }
+
+        return result
+    }
+
+    private fun modifyLinearAcceleration(values: FloatArray, timestamp: Long): FloatArray {
+        val result = FloatArray(3)
+
+        if (isMoving()) {
+            val t = (timestamp % 1_000_000_000) / 1_000_000_000.0f + (timestamp / 1_000_000_000).toFloat()
+            val walkPhase = (t * WALK_FREQ_HZ * TWO_PI).toDouble()
+            val speedFactor = (getSpeed() / 3.0f).coerceIn(0.5f, 2.0f)
+
+            result[0] = ACCEL_WALK_AMPLITUDE * 0.3f * sin(walkPhase).toFloat() * speedFactor +
+                    gaussianNoise(ACCEL_STATIC_NOISE * 0.5f)
+            result[1] = ACCEL_WALK_AMPLITUDE * 0.15f * sin(walkPhase * 0.7).toFloat() * speedFactor +
+                    gaussianNoise(ACCEL_STATIC_NOISE * 0.5f)
+            result[2] = ACCEL_WALK_AMPLITUDE * 0.5f * sin(walkPhase * 2).toFloat() * speedFactor +
+                    gaussianNoise(ACCEL_STATIC_NOISE * 0.5f)
+        } else {
+            result[0] = gaussianNoise(ACCEL_STATIC_NOISE)
+            result[1] = gaussianNoise(ACCEL_STATIC_NOISE)
+            result[2] = gaussianNoise(ACCEL_STATIC_NOISE)
+        }
+
+        return result
+    }
+
+    private fun modifyPressure(values: FloatArray, timestamp: Long): FloatArray {
+        val result = FloatArray(1)
+        val altitude = try {
+            ConfigManager.getFakeLocation().altitude.toFloat()
+        } catch (_: Exception) {
+            0f
+        }
+        val pressureFromAltitude = PRESSURE_BASE * Math.pow(1.0 - 2.2558e-5 * altitude, 5.2558).toFloat()
+        result[0] = pressureFromAltitude + gaussianNoise(0.1f)
+        return result
     }
 }

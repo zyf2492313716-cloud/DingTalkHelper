@@ -20,7 +20,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
  *
  * 借鉴 XposedFakeLocation 的 GNSS 伪造思路：
  * - Hook GnssStatus 返回伪造的卫星数量和信号数据
- * - 返回伪造的 GNSS 测量数据（8-12颗卫星）
+ * - 返回伪造的 GNSS 测量数据（多星座卫星）
  * - 返回伪造的导航消息数据
  */
 class GnssHooks : HookEntry.HookHandler {
@@ -28,11 +28,62 @@ class GnssHooks : HookEntry.HookHandler {
     companion object {
         private const val TAG = "${Constants.LOG_PREFIX}:GNSS"
 
-        // 模拟的卫星配置
-        private const val SATELLITE_COUNT = 12
-        private const val BASE_CN0 = 35.0f
-        private const val BASE_ELEVATION = 45.0f
-        private const val BASE_AZIMUTH_STEP = 30.0f
+        private const val GPS_EPOCH_OFFSET_SECONDS = 315964800L
+        private const val STATE_CODE_LOCK = 1
+        private const val STATE_TOW_DECODED = 2
+        private const val STATE_BIT_SYNC = 4
+        private const val STATE_SUBFRAME_SYNC = 8
+        private const val FULL_STATE = STATE_CODE_LOCK or STATE_TOW_DECODED or STATE_BIT_SYNC or STATE_SUBFRAME_SYNC
+
+        private const val GNSS_CONSTELLATION_GPS = 1
+        private const val GNSS_CONSTELLATION_SBAS = 2
+        private const val GNSS_CONSTELLATION_GLONASS = 3
+        private const val GNSS_CONSTELLATION_QZSS = 4
+        private const val GNSS_CONSTELLATION_BEIDOU = 5
+        private const val GNSS_CONSTELLATION_GALILEO = 6
+        private const val GNSS_CONSTELLATION_IRNSS = 7
+
+        private const val FULL_BIAS_BASE_GPS_NANOS = (GPS_EPOCH_OFFSET_SECONDS * 1_000_000_000L)
+        private const val FULL_BIAS_DRIFT_PER_DAY_NANOS = 5L
+    }
+
+    private data class SatelliteInfo(
+        val svid: Int,
+        val constellationType: Int,
+        val cn0: Float,
+        val elevation: Float,
+        val azimuth: Float,
+        val usedInFix: Boolean
+    )
+
+    private val satellites: List<SatelliteInfo> by lazy { generateSatellites() }
+
+    private fun generateSatellites(): List<SatelliteInfo> {
+        val result = mutableListOf<SatelliteInfo>()
+        val random = java.util.Random(42)
+        val usedCount = 12 + random.nextInt(5)
+
+        val gpsCount = 7 + random.nextInt(4)
+        val glonassCount = 4 + random.nextInt(3)
+        val beidouCount = 5 + random.nextInt(4)
+        val galileoCount = 3 + random.nextInt(3)
+
+        fun addSatellites(count: Int, constellation: Int, svidRange: IntRange) {
+            val svids = svidRange.toList().shuffled(random).take(count)
+            for (svid in svids) {
+                val cn0 = (28f + random.nextFloat() * 18f)
+                val elevation = (10f + random.nextFloat() * 70f)
+                val azimuth = (random.nextFloat() * 360f)
+                result.add(SatelliteInfo(svid, constellation, cn0, elevation, azimuth, result.size < usedCount))
+            }
+        }
+
+        addSatellites(gpsCount, GNSS_CONSTELLATION_GPS, 1..32)
+        addSatellites(glonassCount, GNSS_CONSTELLATION_GLONASS, 1..24)
+        addSatellites(beidouCount, GNSS_CONSTELLATION_BEIDOU, 1..37)
+        addSatellites(galileoCount, GNSS_CONSTELLATION_GALILEO, 1..36)
+
+        return result.shuffled(random)
     }
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -56,61 +107,64 @@ class GnssHooks : HookEntry.HookHandler {
                 "android.location.GnssStatus", lpparam.classLoader
             )
 
-            // 卫星数量
             XposedHelpers.findAndHookMethod(
                 gnssStatusClass, "getSatelliteCount",
                 object : XC_MethodReplacement() {
-                    override fun replaceHookedMethod(param: MethodHookParam): Any = SATELLITE_COUNT
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = satellites.size
                 }
             )
 
-            // 卫星编号
             XposedHelpers.findAndHookMethod(
                 gnssStatusClass, "getSvid", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return (param.args[0] as Int) + 1
+                        return satellites[param.args[0] as Int].svid
                     }
                 }
             )
 
-            // 信噪比
+            XposedHelpers.findAndHookMethod(
+                gnssStatusClass, "getConstellationType", Int::class.java,
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        return satellites[param.args[0] as Int].constellationType
+                    }
+                }
+            )
+
             XposedHelpers.findAndHookMethod(
                 gnssStatusClass, "getCn0DbHz", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return BASE_CN0 + (Math.random() * 10 - 5).toFloat()
+                        val base = satellites[param.args[0] as Int].cn0
+                        return base + (java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 4f - 2f).toFloat()
                     }
                 }
             )
 
-            // 仰角
             XposedHelpers.findAndHookMethod(
                 gnssStatusClass, "getElevationDegrees", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return BASE_ELEVATION + (Math.random() * 30 - 15).toFloat()
+                        return satellites[param.args[0] as Int].elevation
                     }
                 }
             )
 
-            // 方位角
             XposedHelpers.findAndHookMethod(
                 gnssStatusClass, "getAzimuthDegrees", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        val index = param.args[0] as Int
-                        return (index * BASE_AZIMUTH_STEP + Math.random() * 20).toFloat() % 360
+                        return satellites[param.args[0] as Int].azimuth
                     }
                 }
             )
 
-            // 是否用于定位（前8颗）
             XposedHelpers.findAndHookMethod(
                 gnssStatusClass, "usedInFix", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return (param.args[0] as Int) < 8
+                        return satellites[param.args[0] as Int].usedInFix
                     }
                 }
             )
@@ -148,13 +202,12 @@ class GnssHooks : HookEntry.HookHandler {
                 "android.location.GnssMeasurementsEvent", lpparam.classLoader
             )
 
-            // 返回伪造的测量数据列表
             XposedHelpers.findAndHookMethod(
                 eventClass, "getMeasurements",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val measurements = (1..SATELLITE_COUNT).map { svid ->
-                            createFakeGnssMeasurement(svid)
+                        val measurements = satellites.mapIndexed { index, sat ->
+                            createFakeGnssMeasurement(sat, index)
                         }
                         param.result = measurements
                     }
@@ -173,34 +226,28 @@ class GnssHooks : HookEntry.HookHandler {
     /**
      * 创建伪造的 GnssMeasurement 对象
      */
-    private fun createFakeGnssMeasurement(svid: Int): GnssMeasurement {
+    private fun createFakeGnssMeasurement(sat: SatelliteInfo, index: Int): GnssMeasurement {
         val measurement = XposedHelpers.newInstance(GnssMeasurement::class.java) as GnssMeasurement
-        
-        // 设置卫星基本信息
-        XposedHelpers.setIntField(measurement, "mSvid", svid)
-        XposedHelpers.setIntField(measurement, "mConstellationType", 1) // GPS
-        
-        // 设置信噪比 (25-45 dB-Hz)
-        val cn0 = (25..45).random().toFloat()
+
+        XposedHelpers.setIntField(measurement, "mSvid", sat.svid)
+        XposedHelpers.setIntField(measurement, "mConstellationType", sat.constellationType)
+
+        val cn0 = sat.cn0 + (java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 4f - 2f).toFloat()
         XposedHelpers.setFloatField(measurement, "mCn0DbHz", cn0)
-        
-        // 设置时间偏移保持一致性
+
         XposedHelpers.setDoubleField(measurement, "mTimeOffsetNanos", 0.0)
-        
-        // 设置伪距率 (模拟卫星运动)
-        val pseudorangeRate = (Math.random() * 1000 - 500).toDouble()
+
+        val pseudorangeRate = java.util.Random(index.toLong() + 1000).nextGaussian() * 200.0
         XposedHelpers.setDoubleField(measurement, "mPseudorangeRateMetersPerSecond", pseudorangeRate)
-        
-        // 设置接收卫星时间
-        val receivedSvTime = System.currentTimeMillis() * 1_000_000L
+
+        val gpsTimeNanos = (System.currentTimeMillis() / 1000 - GPS_EPOCH_OFFSET_SECONDS) * 1_000_000_000L
+        val receivedSvTime = gpsTimeNanos + (index * 100_000L)
         XposedHelpers.setLongField(measurement, "mReceivedSvTimeNanos", receivedSvTime)
-        
-        // 设置状态为已锁定
-        XposedHelpers.setIntField(measurement, "mState", 1) // STATE_CODE_LOCK
-        
-        // 设置多路径指示器为无多路径
-        XposedHelpers.setIntField(measurement, "mMultipathIndicator", 0) // MULTIPATH_INDICATOR_NOT_DETECTED
-        
+
+        XposedHelpers.setIntField(measurement, "mState", FULL_STATE)
+
+        XposedHelpers.setIntField(measurement, "mMultipathIndicator", 0)
+
         return measurement
     }
 
@@ -213,15 +260,13 @@ class GnssHooks : HookEntry.HookHandler {
                 "android.location.GnssClock", lpparam.classLoader
             )
 
-            // 返回与系统时间一致的 GPS 时间（纳秒）
             XposedHelpers.findAndHookMethod(
                 clockClass, "getTimeNanos",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        // 系统时间转换为纳秒，并添加小的随机抖动模拟真实时钟
-                        val baseTime = System.currentTimeMillis() * 1_000_000L
-                        val jitter = (Math.random() * 1000).toLong() // 0-1000 纳秒抖动
-                        return baseTime + jitter
+                        val gpsSeconds = System.currentTimeMillis() / 1000 - GPS_EPOCH_OFFSET_SECONDS
+                        val jitter = (java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 100).toLong()
+                        return gpsSeconds * 1_000_000_000L + jitter
                     }
                 }
             )
@@ -252,8 +297,8 @@ class GnssHooks : HookEntry.HookHandler {
                 clockClass, "getFullBiasNanos",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        // GPS 时间与系统时间的偏差
-                        return System.currentTimeMillis() * 1_000_000L - System.nanoTime()
+                        val daysSinceEpoch = (System.currentTimeMillis() / 1000 - GPS_EPOCH_OFFSET_SECONDS) / 86400
+                        return FULL_BIAS_BASE_GPS_NANOS + daysSinceEpoch * FULL_BIAS_DRIFT_PER_DAY_NANOS
                     }
                 }
             )
@@ -270,7 +315,7 @@ class GnssHooks : HookEntry.HookHandler {
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
                         // 小的亚纳秒级偏差
-                        return Math.random() * 0.1
+                        return java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 0.1
                     }
                 }
             )
@@ -368,32 +413,25 @@ class GnssHooks : HookEntry.HookHandler {
      */
     private fun createFakeGnssNavigationMessage(): GnssNavigationMessage {
         val message = XposedHelpers.newInstance(GnssNavigationMessage::class.java) as GnssNavigationMessage
-        
-        // 设置卫星编号 (1-32 for GPS)
-        XposedHelpers.setIntField(message, "mSvid", (1..32).random())
-        
-        // 设置星座类型 (GPS = 1)
-        XposedHelpers.setIntField(message, "mConstellationType", 1)
-        
-        // 设置消息类型 (导航消息类型)
-        XposedHelpers.setIntField(message, "mType", 1) // GPS L1 C/A
-        
-        // 设置状态 (已同步)
-        XposedHelpers.setIntField(message, "mStatus", 1) // STATUS_PARITY_PASSED
-        
-        // 设置伪造的子帧数据 (24 字节)
+
+        val sat = satellites.random()
+        XposedHelpers.setIntField(message, "mSvid", sat.svid)
+        XposedHelpers.setIntField(message, "mConstellationType", sat.constellationType)
+
+        XposedHelpers.setIntField(message, "mType", 1)
+
+        XposedHelpers.setIntField(message, "mStatus", 1)
+
         val data = ByteArray(24)
         (0 until 24).forEach { i ->
-            data[i] = (Math.random() * 256).toInt().toByte()
+            data[i] = java.util.concurrent.ThreadLocalRandom.current().nextInt(256).toByte()
         }
         XposedHelpers.setObjectField(message, "mData", data)
-        
-        // 设置消息编号
+
         XposedHelpers.setIntField(message, "mMessageId", (1..10).random())
-        
-        // 设置子消息编号
+
         XposedHelpers.setIntField(message, "mSubmessageId", (1..5).random())
-        
+
         return message
     }
 }
