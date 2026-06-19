@@ -150,34 +150,16 @@ class SensorHooks : HookEntry.HookHandler {
     }
 
     private fun registerSensorModifier(sensorType: Int) {
-        if (sensorModifiers.containsKey(sensorType)) return
-
-        when (sensorType) {
-            Sensor.TYPE_ACCELEROMETER -> {
-                sensorModifiers[sensorType] = ::modifyAccelerometer
-                HookUtils.logDebug("$TAG: 注册加速度计修改器")
-            }
-            Sensor.TYPE_GYROSCOPE -> {
-                sensorModifiers[sensorType] = ::modifyGyroscope
-                HookUtils.logDebug("$TAG: 注册陀螺仪修改器")
-            }
-            Sensor.TYPE_MAGNETIC_FIELD -> {
-                sensorModifiers[sensorType] = ::modifyMagneticField
-                HookUtils.logDebug("$TAG: 注册磁力计修改器")
-            }
-            Sensor.TYPE_GRAVITY -> {
-                sensorModifiers[sensorType] = ::modifyGravity
-                HookUtils.logDebug("$TAG: 注册重力传感器修改器")
-            }
-            Sensor.TYPE_LINEAR_ACCELERATION -> {
-                sensorModifiers[sensorType] = ::modifyLinearAcceleration
-                HookUtils.logDebug("$TAG: 注册线性加速度修改器")
-            }
-            Sensor.TYPE_PRESSURE -> {
-                sensorModifiers[sensorType] = ::modifyPressure
-                HookUtils.logDebug("$TAG: 注册气压计修改器")
-            }
+        val modifier: (FloatArray, Long) -> FloatArray = when (sensorType) {
+            Sensor.TYPE_ACCELEROMETER -> ::modifyAccelerometer
+            Sensor.TYPE_GYROSCOPE -> ::modifyGyroscope
+            Sensor.TYPE_MAGNETIC_FIELD -> ::modifyMagneticField
+            Sensor.TYPE_GRAVITY -> ::modifyGravity
+            Sensor.TYPE_LINEAR_ACCELERATION -> ::modifyLinearAcceleration
+            Sensor.TYPE_PRESSURE -> ::modifyPressure
+            else -> return
         }
+        sensorModifiers.putIfAbsent(sensorType, modifier)
     }
 
     private fun isMoving(): Boolean {
