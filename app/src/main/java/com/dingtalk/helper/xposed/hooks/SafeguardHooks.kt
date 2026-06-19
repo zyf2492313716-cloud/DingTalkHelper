@@ -148,6 +148,22 @@ class SafeguardHooks : HookEntry.HookHandler {
                 HookUtils.logDebug("$TAG: getSecurityDataEx Hook 失败: ${e.message}")
             }
 
+            // Hook doUploadBasicData - 监控数据上报
+            try {
+                XposedHelpers.findAndHookMethod(
+                    safeGuardMainClass,
+                    "doUploadBasicData",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            HookUtils.logDebug("$TAG: doUploadBasicData 被调用 - 数据上报中")
+                        }
+                    }
+                )
+                HookUtils.log("$TAG: doUploadBasicData Hook 完成")
+            } catch (e: Exception) {
+                HookUtils.logDebug("$TAG: doUploadBasicData Hook 失败: ${e.message}")
+            }
+
             HookUtils.log("$TAG: SafeGuardMain Hook 完成")
         } catch (e: ClassNotFoundException) {
             HookUtils.logDebug("$TAG: SafeGuardMain 类未找到 (可能混淆)")
