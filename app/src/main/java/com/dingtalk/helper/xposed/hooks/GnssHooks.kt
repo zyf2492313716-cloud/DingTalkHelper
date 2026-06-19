@@ -174,7 +174,7 @@ class GnssHooks : HookEntry.HookHandler {
      * 创建伪造的 GnssMeasurement 对象
      */
     private fun createFakeGnssMeasurement(svid: Int): GnssMeasurement {
-        val measurement = XposedHelpers.newInstance(GnssMeasurement::class.java)
+        val measurement = XposedHelpers.newInstance(GnssMeasurement::class.java) as GnssMeasurement
         
         // 设置卫星基本信息
         XposedHelpers.setIntField(measurement, "mSvid", svid)
@@ -367,7 +367,7 @@ class GnssHooks : HookEntry.HookHandler {
      * 创建伪造的 GnssNavigationMessage 对象
      */
     private fun createFakeGnssNavigationMessage(): GnssNavigationMessage {
-        val message = XposedHelpers.newInstance(GnssNavigationMessage::class.java)
+        val message = XposedHelpers.newInstance(GnssNavigationMessage::class.java) as GnssNavigationMessage
         
         // 设置卫星编号 (1-32 for GPS)
         XposedHelpers.setIntField(message, "mSvid", (1..32).random())
