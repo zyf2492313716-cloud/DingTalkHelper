@@ -61,11 +61,28 @@ class DeepHidingHooks : HookEntry.HookHandler {
             "/data/adb/zygisk"
         )
 
-        // /proc/maps 中需要过滤的关键词
+        // /proc/maps 中需要过滤的关键词（扩展版，包含 .so 库特征）
         private val PROC_MAPS_KEYWORDS = setOf(
             "lsposed", "xposed", "riru", "lsplant",
             "edxposed", "magisk", "zygisk",
-            "com.dingtalk.helper", "hidemyapplist"
+            "com.dingtalk.helper", "hidemyapplist",
+            // .so 库特征
+            "liblsposed_art.so", "libmemudisk.so",
+            "libxposed_art.so", "libsandhook.so",
+            "libwhale.so", "libtiran.so",
+            "liblspd.so", "libriru.so"
+        )
+
+        // 需要拦截的 /proc/self/maps等路径
+        private val PROC_SELF_PATHS = setOf(
+            "/proc/self/maps",
+            "/proc/self/smaps",
+            "/proc/self/status",
+            "/proc/self/wchan",
+            "/proc/self/cmdline",
+            "/proc/self/mountinfo",
+            "/proc/thread-self/maps",
+            "/proc/thread-self/status"
         )
 
         // Magisk 相关路径关键词（用于文件路径检查）
@@ -101,10 +118,10 @@ class DeepHidingHooks : HookEntry.HookHandler {
         }
     }
 
-    // ==================== /proc/self/maps 隐藏 ====================
+    // ==================== /proc/self/maps等 隐藏 ====================
 
     /**
-     * 拦截对 /proc/self/maps 的读取
+     * 拦截对 /proc/self/maps等 的读取
      * 通过 FileInputStream + BufferedReader 双层过滤
      */
     private fun hookProcMaps(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -420,13 +437,14 @@ class DeepHidingHooks : HookEntry.HookHandler {
     // ==================== 工具方法 ====================
 
     /**
-     * 检查路径是否为 /proc/self/maps 或其变种
+     * 检查路径是否为敏感 /proc/self/maps等 路径
      */
     private fun isProcMapsPath(path: String): Boolean {
         val normalizedPath = path.replace("//", "/")
-        return normalizedPath == "/proc/self/maps" ||
-               normalizedPath == "/proc/thread-self/maps" ||
-               normalizedPath.matches(Regex("/proc/\\d+/maps"))
+        return PROC_SELF_PATHS.any { normalizedPath.startsWith(it) } ||
+               normalizedPath.matches(Regex("/proc/\\d+/maps")) ||
+               normalizedPath.matches(Regex("/proc/\\d+/status")) ||
+               normalizedPath.matches(Regex("/proc/\\d+/smaps"))
     }
 
     /**

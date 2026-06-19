@@ -14,6 +14,9 @@
 # 保留数据类（ConfigManager 内部类）
 -keep class com.dingtalk.helper.utils.ConfigManager$* { *; }
 
+# 保留数据生成类（被 Hook 类引用）
+-keep class com.dingtalk.helper.xposed.data.** { *; }
+
 # 保留 ConfigEncryption（反射使用）
 -keep class com.dingtalk.helper.utils.ConfigEncryption { *; }
 -keep class com.dingtalk.helper.utils.ConfigEncryption$* { *; }
