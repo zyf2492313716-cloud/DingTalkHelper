@@ -545,8 +545,8 @@ class LocationHooks : HookEntry.HookHandler {
         }
     }
 
-    private fun signatureToString(signature: Array<Class<*>>): String {
-        return signature.joinToString(", ") { it.simpleName }
+    private fun signatureToString(signature: Array<out Class<*>?>): String {
+        return signature.joinToString(", ") { it?.simpleName ?: "null" }
     }
 
     private fun hookGnssStatus(clazz: Class<*>) {
