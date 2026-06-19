@@ -8,6 +8,7 @@ import android.os.Build
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
 import com.dingtalk.helper.xposed.data.FakeDataProvider
+import com.dingtalk.helper.xposed.data.TimingManager
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookLogger
 import com.dingtalk.helper.xposed.utils.HookUtils
@@ -40,22 +41,8 @@ class GnssHooks : HookEntry.HookHandler {
         private const val FULL_BIAS_BASE_GPS_NANOS = (GPS_EPOCH_OFFSET_SECONDS * 1_000_000_000L)
         private const val FULL_BIAS_DRIFT_PER_DAY_NANOS = 5L
 
-        // 类级别的 ScheduledExecutorService，避免每次注册都创建新 executor
-        private val scheduledExecutor: java.util.concurrent.ScheduledExecutorService by lazy {
-            java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
-                Thread(r, "GnssNavMsg-Scheduler").apply { isDaemon = true }
-            }
-        }
-
-        // 跟踪活跃的定时任务，用于取消
-        private val activeNavMessageTasks = java.util.concurrent.ConcurrentHashMap<GnssNavigationMessage.Callback, java.util.concurrent.ScheduledFuture<*>>()
-
-        /**
-         * 清理所有定时任务
-         */
         fun cleanup() {
-            activeNavMessageTasks.values.forEach { it.cancel(false) }
-            activeNavMessageTasks.clear()
+            TimingManager.cancelAll()
         }
     }
 
@@ -478,18 +465,13 @@ class GnssHooks : HookEntry.HookHandler {
 
                     targetExecutor.execute { deliver() }
 
-                    // 取消该 callback 之前可能存在的定时任务
-                    activeNavMessageTasks[callback]?.cancel(false)
-
-                    // 使用类级别的 scheduledExecutor，避免每次创建新 executor
-                    val future = scheduledExecutor.scheduleAtFixedRate({
+                    // Register periodic navigation message updates via TimingManager
+                    val navKey = "navmsg_${callback.hashCode()}"
+                    TimingManager.startNavigationMessageUpdates(navKey, 1000) {
                         try { targetExecutor.execute { deliver() } } catch (e: Exception) {
                             HookLogger.logDebug(TAG, "定时发送导航消息失败: ${e.message}")
                         }
-                    }, 1000, 1000, java.util.concurrent.TimeUnit.MILLISECONDS)
-
-                    // 记录活跃任务
-                    activeNavMessageTasks[callback] = future
+                    }
                 }
             }
 
@@ -502,7 +484,7 @@ class GnssHooks : HookEntry.HookHandler {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             val callback = param.args[0] as? GnssNavigationMessage.Callback ?: return
-                            activeNavMessageTasks.remove(callback)?.cancel(false)
+                            TimingManager.cancelTask("navmsg_${callback.hashCode()}")
                         }
                     }
                 )

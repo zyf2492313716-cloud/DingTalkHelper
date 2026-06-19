@@ -3,6 +3,7 @@ package com.dingtalk.helper.xposed.hooks
 import android.hardware.SensorManager
 import android.os.Build
 import com.dingtalk.helper.xposed.HookEntry
+import com.dingtalk.helper.xposed.data.RandomizedDeviceId
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
@@ -11,16 +12,11 @@ import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.io.File
 
-/**
- * 模拟器隐藏模块
- * 隐藏 Android 模拟器特征，绕过钉钉的模拟器检测
- */
 class EmulatorHooks : HookEntry.HookHandler {
 
     companion object {
         private const val TAG = "${Constants.LOG_PREFIX}/Emulator"
 
-        // 模拟器传感器特征关键词
         private val EMULATOR_SENSOR_KEYWORDS = setOf(
             "goldfish", "ranchu", "emulator", "qemu", "vbox",
             "genymotion", "nox", "bluestacks", "ldplayer"
@@ -39,45 +35,230 @@ class EmulatorHooks : HookEntry.HookHandler {
             val incremental: String,
             val release: String,
             val sdkInt: Int,
-            val securityPatch: String,
-            val serial: String
+            val securityPatch: String
         )
 
+        @Suppress("SpellCheckingInspection")
         private val DEVICE_PROFILES = listOf(
+            // ==================== Samsung ====================
             DeviceConfig(
                 brand = "samsung", model = "SM-S928B", device = "e3q", product = "e3q",
-                board = "pineapple", hardware = "pineapple", manufacturer = "samsung",
+                board = "pineapple", hardware = "qcom", manufacturer = "samsung",
                 fingerprint = "samsung/e3q/e3q:14/UP1A.231005.007/S928BXXU3AXK4:user/release-keys",
                 display = "UP1A.231005.007", incremental = "S928BXXU3AXK4",
-                release = "14", sdkInt = 34, securityPatch = "2024-11-01", serial = "R5CX21ABCDEF"
+                release = "14", sdkInt = 34, securityPatch = "2024-11-01"
             ),
             DeviceConfig(
                 brand = "samsung", model = "SM-S911B", device = "r11", product = "r11",
-                board = "taro", hardware = "taro", manufacturer = "samsung",
+                board = "taro", hardware = "qcom", manufacturer = "samsung",
                 fingerprint = "samsung/r11/r11:14/UP1A.231005.007/S911BXXU5CWK1:user/release-keys",
                 display = "UP1A.231005.007", incremental = "S911BXXU5CWK1",
-                release = "14", sdkInt = 34, securityPatch = "2024-11-01", serial = "R5CXA0ABCDEF"
+                release = "14", sdkInt = 34, securityPatch = "2024-11-01"
             ),
             DeviceConfig(
-                brand = "Xiaomi", model = "23127PN0CC", device = "houji", product = "houji",
-                board = "taro", hardware = "qcom", manufacturer = "Xiaomi",
+                brand = "samsung", model = "SM-A546B", device = "a54x", product = "a54x",
+                board = "s5e8835", hardware = "samsungexynos1380", manufacturer = "samsung",
+                fingerprint = "samsung/a54x/a54x:14/UP1A.231005.007/A546BXXU7DXJ3:user/release-keys",
+                display = "UP1A.231005.007", incremental = "A546BXXU7DXJ3",
+                release = "14", sdkInt = 34, securityPatch = "2024-10-01"
+            ),
+            DeviceConfig(
+                brand = "samsung", model = "SM-A346B", device = "a34x", product = "a34x",
+                board = "mt6877", hardware = "mt6877", manufacturer = "samsung",
+                fingerprint = "samsung/a34x/a34x:14/UP1A.231005.007/A346BXXU7DXI1:user/release-keys",
+                display = "UP1A.231005.007", incremental = "A346BXXU7DXI1",
+                release = "14", sdkInt = 34, securityPatch = "2024-09-01"
+            ),
+            DeviceConfig(
+                brand = "samsung", model = "SM-F731B", device = "b3q", product = "b3q",
+                board = "taro", hardware = "qcom", manufacturer = "samsung",
+                fingerprint = "samsung/b3q/b3q:14/UP1A.231005.007/F731BXXU3AXK3:user/release-keys",
+                display = "UP1A.231005.007", incremental = "F731BXXU3AXK3",
+                release = "14", sdkInt = 34, securityPatch = "2024-11-01"
+            ),
+            DeviceConfig(
+                brand = "samsung", model = "SM-N986B", device = "c2q", product = "c2q",
+                board = "exynos990", hardware = "samsungexynos990", manufacturer = "samsung",
+                fingerprint = "samsung/c2q/c2q:13/TP1A.220624.014/N986BXXS8FWA1:user/release-keys",
+                display = "TP1A.220624.014", incremental = "N986BXXS8FWA1",
+                release = "13", sdkInt = 33, securityPatch = "2024-01-01"
+            ),
+            // ==================== Xiaomi ====================
+            DeviceConfig(
+                brand = "xiaomi", model = "23127PN0CC", device = "houji", product = "houji",
+                board = "kalama", hardware = "qcom", manufacturer = "Xiaomi",
                 fingerprint = "Xiaomi/houji/houji:14/UKQ1.231003.001/V816.0.24.10.17.DEV:user/release-keys",
                 display = "UKQ1.231003.001", incremental = "V816.0.24.10.17.DEV",
-                release = "14", sdkInt = 34, securityPatch = "2024-10-01", serial = "XA0BCDEF1234"
+                release = "14", sdkInt = 34, securityPatch = "2024-10-01"
             ),
             DeviceConfig(
-                brand = "OnePlus", model = "CPH2573", device = "aston", product = "aston",
-                board = "taro", hardware = "qcom", manufacturer = "OnePlus",
+                brand = "xiaomi", model = "23116PN5BC", device = "manet", product = "manet",
+                board = "manet", hardware = "qcom", manufacturer = "Xiaomi",
+                fingerprint = "Xiaomi/manet/manet:14/UKQ1.231003.001/OS1.0.23.12.11.DEV:user/release-keys",
+                display = "UKQ1.231003.001", incremental = "OS1.0.23.12.11.DEV",
+                release = "14", sdkInt = 34, securityPatch = "2024-06-01"
+            ),
+            DeviceConfig(
+                brand = "xiaomi", model = "Redmi Note 12", device = "topaz", product = "topaz",
+                board = "mt6768", hardware = "mt6768", manufacturer = "Xiaomi",
+                fingerprint = "Xiaomi/topaz/topaz:13/TP1A.220624.014/V14.0.23.12.13.DEV:user/release-keys",
+                display = "TP1A.220624.014", incremental = "V14.0.23.12.13.DEV",
+                release = "13", sdkInt = 33, securityPatch = "2023-12-01"
+            ),
+            DeviceConfig(
+                brand = "xiaomi", model = "M2012K11AC", device = "star", product = "star",
+                board = "kona", hardware = "qcom", manufacturer = "Xiaomi",
+                fingerprint = "Xiaomi/star/star:13/TKQ1.220829.002/V14.0.23.9.27.DEV:user/release-keys",
+                display = "TKQ1.220829.002", incremental = "V14.0.23.9.27.DEV",
+                release = "13", sdkInt = 33, securityPatch = "2023-09-01"
+            ),
+            // ==================== Huawei ====================
+            DeviceConfig(
+                brand = "huawei", model = "ALN-AL10", device = "ALN", product = "ALN",
+                board = "kirin9000s", hardware = "kirin9000s", manufacturer = "HUAWEI",
+                fingerprint = "HUAWEI/ALN-AL10/ALN:14/HUAWEIALN-AL10/110.0.1.130C234E1:user/release-keys",
+                display = "HUAWEIALN-AL10", incremental = "110.0.1.130C234E1",
+                release = "14", sdkInt = 34, securityPatch = "2024-09-01"
+            ),
+            DeviceConfig(
+                brand = "huawei", model = "MNA-AL00", device = "MNA", product = "MNA",
+                board = "kirin990", hardware = "kirin990", manufacturer = "HUAWEI",
+                fingerprint = "HUAWEI/MNA-AL00/MNA:12/SP1A.210812.016/12.0.1.160C605E2:user/release-keys",
+                display = "SP1A.210812.016", incremental = "12.0.1.160C605E2",
+                release = "12", sdkInt = 31, securityPatch = "2023-07-01"
+            ),
+            DeviceConfig(
+                brand = "huawei", model = "BNE-AL00", device = "BNE", product = "BNE",
+                board = "kirin9000s", hardware = "kirin9000s", manufacturer = "HUAWEI",
+                fingerprint = "HUAWEI/BNE-AL00/BNE:14/HUAWEIBNE-AL00/102.0.1.120C636E1:user/release-keys",
+                display = "HUAWEIBNE-AL00", incremental = "102.0.1.120C636E1",
+                release = "14", sdkInt = 34, securityPatch = "2024-06-01"
+            ),
+            DeviceConfig(
+                brand = "huawei", model = "VCN-AL00", device = "VCN", product = "VCN",
+                board = "kirin990", hardware = "kirin990", manufacturer = "HUAWEI",
+                fingerprint = "HUAWEI/VCN-AL00/VCN:12/SP1A.210812.016/12.0.0.126C605E2:user/release-keys",
+                display = "SP1A.210812.016", incremental = "12.0.0.126C605E2",
+                release = "12", sdkInt = 31, securityPatch = "2023-01-01"
+            ),
+            // ==================== OPPO ====================
+            DeviceConfig(
+                brand = "oppo", model = "PHZ110", device = "socrates", product = "socrates",
+                board = "kite", hardware = "qcom", manufacturer = "OPPO",
+                fingerprint = "OPPO/socrates/socrates:14/UKQ1.231003.001/PHZ110_14.0.1.600(EX01V110P02)_:user/release-keys",
+                display = "UKQ1.231003.001", incremental = "PHZ110_14.0.1.600(EX01V110P02)_",
+                release = "14", sdkInt = 34, securityPatch = "2024-08-01"
+            ),
+            DeviceConfig(
+                brand = "oppo", model = "PJZ110", device = "astrid", product = "astrid",
+                board = "mt6895", hardware = "mt6895", manufacturer = "OPPO",
+                fingerprint = "OPPO/astrid/astrid:14/UKQ1.231003.001/PJZ110_14.0.1.500(EX01V110P01)_:user/release-keys",
+                display = "UKQ1.231003.001", incremental = "PJZ110_14.0.1.500(EX01V110P01)_",
+                release = "14", sdkInt = 34, securityPatch = "2024-07-01"
+            ),
+            DeviceConfig(
+                brand = "oppo", model = "CPH2591", device = "magnolia", product = "magnolia",
+                board = "mt6769", hardware = "mt6769", manufacturer = "OPPO",
+                fingerprint = "OPPO/magnolia/magnolia:13/TP1A.220624.014/CPH2591_13.1.1.400(EX01V110P01)_:user/release-keys",
+                display = "TP1A.220624.014", incremental = "CPH2591_13.1.1.400(EX01V110P01)_",
+                release = "13", sdkInt = 33, securityPatch = "2023-11-01"
+            ),
+            // ==================== vivo ====================
+            DeviceConfig(
+                brand = "vivo", model = "V2324A", device = "V2324A", product = "V2324A",
+                board = "kite", hardware = "qcom", manufacturer = "vivo",
+                fingerprint = "vivo/V2324A/V2324A:14/UP1A.231005.007/14.0.23.12.12.W30.V1:user/release-keys",
+                display = "UP1A.231005.007", incremental = "14.0.23.12.12.W30.V1",
+                release = "14", sdkInt = 34, securityPatch = "2024-06-01"
+            ),
+            DeviceConfig(
+                brand = "vivo", model = "V2332A", device = "V2332A", product = "V2332A",
+                board = "mt6895", hardware = "mt6895", manufacturer = "vivo",
+                fingerprint = "vivo/V2332A/V2332A:14/UKQ1.231003.001/14.0.12.2.W30.V1:user/release-keys",
+                display = "UKQ1.231003.001", incremental = "14.0.12.2.W30.V1",
+                release = "14", sdkInt = 34, securityPatch = "2024-05-01"
+            ),
+            DeviceConfig(
+                brand = "vivo", model = "V2249A", device = "V2249A", product = "V2249A",
+                board = "mt6769", hardware = "mt6769", manufacturer = "vivo",
+                fingerprint = "vivo/V2249A/V2249A:13/TP1A.220624.014/13.0.8.5.W30.V1:user/release-keys",
+                display = "TP1A.220624.014", incremental = "13.0.8.5.W30.V1",
+                release = "13", sdkInt = 33, securityPatch = "2023-10-01"
+            ),
+            // ==================== OnePlus ====================
+            DeviceConfig(
+                brand = "oneplus", model = "CPH2573", device = "aston", product = "aston",
+                board = "kalama", hardware = "qcom", manufacturer = "OnePlus",
                 fingerprint = "OnePlus/aston/aston:14/UKQ1.230924.001/R.136e757_1:user/release-keys",
                 display = "UKQ1.230924.001", incremental = "R.136e757_1",
-                release = "14", sdkInt = 34, securityPatch = "2024-09-01", serial = "OP5ABCDEF123"
+                release = "14", sdkInt = 34, securityPatch = "2024-09-01"
             ),
             DeviceConfig(
+                brand = "oneplus", model = "PJZ110", device = "sultan", product = "sultan",
+                board = "mt6895", hardware = "mt6895", manufacturer = "OnePlus",
+                fingerprint = "OnePlus/sultan/sultan:14/UKQ1.231003.001/Sultan_14.0.1.600:user/release-keys",
+                display = "UKQ1.231003.001", incremental = "Sultan_14.0.1.600",
+                release = "14", sdkInt = 34, securityPatch = "2024-08-01"
+            ),
+            // ==================== Honor ====================
+            DeviceConfig(
+                brand = "honor", model = "BVL-AN16", device = "BVL", product = "BVL",
+                board = "kite", hardware = "qcom", manufacturer = "HONOR",
+                fingerprint = "HONOR/BVL-AN16/BVL:14/UKQ1.231003.001/7.2.0.162SP2C636E2:user/release-keys",
+                display = "UKQ1.231003.001", incremental = "7.2.0.162SP2C636E2",
+                release = "14", sdkInt = 34, securityPatch = "2024-09-01"
+            ),
+            DeviceConfig(
+                brand = "honor", model = "REP-AN00", device = "REP", product = "REP",
+                board = "taro", hardware = "qcom", manufacturer = "HONOR",
+                fingerprint = "HONOR/REP-AN00/REP:13/TP1A.220624.014/7.1.0.155C636E2:user/release-keys",
+                display = "TP1A.220624.014", incremental = "7.1.0.155C636E2",
+                release = "13", sdkInt = 33, securityPatch = "2023-12-01"
+            ),
+            // ==================== Realme ====================
+            DeviceConfig(
+                brand = "realme", model = "RMX3888", device = "gokun", product = "gokun",
+                board = "kite", hardware = "qcom", manufacturer = "realme",
+                fingerprint = "realme/gokun/gokun:14/UKQ1.231003.001/RMX3888_14.0.1.600EX110P01:user/release-keys",
+                display = "UKQ1.231003.001", incremental = "RMX3888_14.0.1.600EX110P01",
+                release = "14", sdkInt = 34, securityPatch = "2024-07-01"
+            ),
+            DeviceConfig(
+                brand = "realme", model = "RMX3771", device = "kritzl", product = "kritzl",
+                board = "mt6893", hardware = "mt6893", manufacturer = "realme",
+                fingerprint = "realme/kritzl/kritzl:13/TP1A.220624.014/RMX3771_13.1.1.400EX110P01:user/release-keys",
+                display = "TP1A.220624.014", incremental = "RMX3771_13.1.1.400EX110P01",
+                release = "13", sdkInt = 33, securityPatch = "2023-11-01"
+            ),
+            // ==================== Google ====================
+            DeviceConfig(
                 brand = "google", model = "Pixel 8 Pro", device = "shiba", product = "shiba",
-                board = "tensor", hardware = "tensor", manufacturer = "Google",
+                board = "zuma", hardware = "zuma", manufacturer = "Google",
                 fingerprint = "google/shiba/shiba:14/UD1A.231105.004/11021471:user/release-keys",
                 display = "UD1A.231105.004", incremental = "11021471",
-                release = "14", sdkInt = 34, securityPatch = "2024-11-05", serial = "GP8ABCDEF123"
+                release = "14", sdkInt = 34, securityPatch = "2024-11-05"
+            ),
+            DeviceConfig(
+                brand = "google", model = "Pixel 7a", device = "lynx", product = "lynx",
+                board = "taro", hardware = "qcom", manufacturer = "Google",
+                fingerprint = "google/lynx/lynx:14/UD1A.231105.004/11021471:user/release-keys",
+                display = "UD1A.231105.004", incremental = "11021471",
+                release = "14", sdkInt = 34, securityPatch = "2024-11-05"
+            ),
+            // ==================== Motorola ====================
+            DeviceConfig(
+                brand = "motorola", model = "XT2313-2", device = "fog", product = "fog",
+                board = "taro", hardware = "qcom", manufacturer = "motorola",
+                fingerprint = "motorola/fog/fog:14/UD1A.231105.004/11021471:user/release-keys",
+                display = "UD1A.231105.004", incremental = "11021471",
+                release = "14", sdkInt = 34, securityPatch = "2024-11-05"
+            ),
+            DeviceConfig(
+                brand = "motorola", model = "XT2201-2", device = "dubai", product = "dubai",
+                board = "taro", hardware = "qcom", manufacturer = "motorola",
+                fingerprint = "motorola/dubai/dubai:13/TP1A.220624.014/SDS22.22-12-14:user/release-keys",
+                display = "TP1A.220624.014", incremental = "SDS22.22-12-14",
+                release = "13", sdkInt = 33, securityPatch = "2023-08-01"
             )
         )
 
@@ -85,29 +266,18 @@ class EmulatorHooks : HookEntry.HookHandler {
         private const val MEMORY_SIZE = 12884901888L
 
         private val SELECTED_DEVICE by lazy { DEVICE_PROFILES.random() }
-        private val DEVICE_SEED by lazy { (SELECTED_DEVICE.model.hashCode().toLong() shl 32) or (android.os.Build.SERIAL.hashCode().toLong() and 0xFFFFFFFFL) }
-
-        fun getRandomIMEI(): String {
-            val rng = java.util.Random(DEVICE_SEED xor 0x494D4549)
-            val sb = StringBuilder("86")
-            repeat(13) { sb.append(rng.nextInt(10)) }
-            return sb.toString()
+        private val DEVICE_SEED by lazy {
+            (SELECTED_DEVICE.model.hashCode().toLong() shl 32) or
+                    (android.os.Build.SERIAL.hashCode().toLong() and 0xFFFFFFFFL)
         }
 
-        fun getRandomAndroidID(): String {
-            val rng = java.util.Random(DEVICE_SEED xor 0x414E4449)
-            val chars = "0123456789abcdef"
-            return buildString(16) { repeat(16) { append(chars[rng.nextInt(16)]) } }
-        }
+        fun getRandomIMEI(): String = RandomizedDeviceId.generateIMEI(DEVICE_SEED)
 
-        fun getRandomSerial(): String = SELECTED_DEVICE.serial
+        fun getRandomAndroidID(): String = RandomizedDeviceId.generateAndroidId(DEVICE_SEED)
 
-        fun getRandomIMSI(): String {
-            val rng = java.util.Random(DEVICE_SEED xor 0x494D5349)
-            val sb = StringBuilder("46000")
-            repeat(10) { sb.append(rng.nextInt(10)) }
-            return sb.toString()
-        }
+        fun getRandomSerial(): String = RandomizedDeviceId.generateSerial(DEVICE_SEED)
+
+        fun getRandomIMSI(): String = RandomizedDeviceId.generateIMSI(DEVICE_SEED)
 
         fun getDeviceBrand(): String = SELECTED_DEVICE.brand
         fun getDeviceModel(): String = SELECTED_DEVICE.model
@@ -149,9 +319,6 @@ class EmulatorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook Build 类属性 - 伪装为真实设备
-     */
     private fun hookBuildProperties() {
         try {
             XposedHelpers.setStaticObjectField(Build::class.java, "BRAND", getDeviceBrand())
@@ -216,9 +383,6 @@ class EmulatorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook SystemProperties - 拦截系统属性读取
-     */
     private fun hookSystemProperties() {
         try {
             val propsClass = XposedHelpers.findClass("android.os.SystemProperties", null)
@@ -254,7 +418,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 "init.svc.qemu-props" to ""
             )
 
-            // Hook SystemProperties.get(String)
             XposedHelpers.findAndHookMethod(
                 propsClass, "get", String::class.java,
                 object : XC_MethodHook() {
@@ -265,7 +428,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook SystemProperties.get(String, String)
             XposedHelpers.findAndHookMethod(
                 propsClass, "get", String::class.java, String::class.java,
                 object : XC_MethodHook() {
@@ -276,7 +438,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook SystemProperties.getInt(String, int)
             XposedHelpers.findAndHookMethod(
                 propsClass, "getInt", String::class.java, Int::class.javaPrimitiveType,
                 object : XC_MethodHook() {
@@ -292,7 +453,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook SystemProperties.getBoolean(String, boolean)
             XposedHelpers.findAndHookMethod(
                 propsClass, "getBoolean", String::class.java, Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
@@ -314,17 +474,12 @@ class EmulatorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook 模拟器检测方法
-     */
     private fun hookEmulatorDetection() {
         try {
-            // Hook Build.IS_EMULATOR (API 31+)
             try {
                 XposedHelpers.setStaticBooleanField(Build::class.java, "IS_EMULATOR", false)
             } catch (_: Exception) {}
 
-            // Hook 常见的模拟器检测方法
             val emulatorChecks = listOf(
                 "isEmulator" to false,
                 "isSimulator" to false,
@@ -333,7 +488,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 "isTest" to false
             )
 
-            // 尝试 Hook 各种检测类
             val detectionClasses = listOf(
                 "com.alibaba.dingtalk.util.DeviceUtils",
                 "com.alibaba.dingtalk.runtimebase.DeviceInfo",
@@ -359,7 +513,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 } catch (_: Exception) {}
             }
 
-            // Hook System.getProperty - 隐藏模拟器属性
             XposedHelpers.findAndHookMethod(
                 System::class.java, "getProperty", String::class.java,
                 object : XC_MethodHook() {
@@ -380,9 +533,6 @@ class EmulatorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook 文件检测 - 隐藏模拟器特征文件
-     */
     private fun hookFileDetection() {
         try {
             XposedHelpers.findAndHookMethod(
@@ -392,30 +542,21 @@ class EmulatorHooks : HookEntry.HookHandler {
                         if (param.result == true) {
                             val file = param.thisObject as File
                             val path = file.absolutePath
-
-                            // 只在检测到模拟器特征路径时才拦截，其他路径保持原样
                             if (path in Constants.EMULATOR_FILES) {
                                 param.result = false
                                 return
-                            }
-
-                            // 隐藏 /proc/cpuinfo 中的模拟器特征
-                            if (path == "/proc/cpuinfo") {
-                                // 不修改文件存在性，但 Hook 读取内容
                             }
                         }
                     }
                 }
             )
 
-            // Hook FileInputStream - 修改 /proc/cpuinfo 内容
             try {
                 val fisClass = java.io.FileInputStream::class.java
                 XposedHelpers.findAndHookMethod(
                     fisClass, "read", ByteArray::class.java,
                     object : XC_MethodHook() {
                         override fun afterHookedMethod(param: MethodHookParam) {
-                            // 检查是否在读取 /proc/cpuinfo
                             try {
                                 val field = fisClass.getDeclaredField("path")
                                 field.isAccessible = true
@@ -424,7 +565,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                                     val bytes = param.args[0] as? ByteArray ?: return
                                     val content = String(bytes)
                                     if (content.contains("goldfish") || content.contains("ranchu")) {
-                                        // 替换为 ARM 架构信息
                                         val fakeContent = content
                                             .replace("goldfish", "armv8")
                                             .replace("ranchu", "armv8")
@@ -446,12 +586,8 @@ class EmulatorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook 传感器检测 - 过滤模拟器传感器
-     */
     private fun hookSensorDetection() {
         try {
-            // Hook SensorManager.getSensorList(int)
             XposedHelpers.findAndHookMethod(
                 SensorManager::class.java, "getSensorList", Int::class.javaPrimitiveType,
                 object : XC_MethodHook() {
@@ -472,7 +608,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook SensorManager.getDefaultSensor(int)
             XposedHelpers.findAndHookMethod(
                 SensorManager::class.java, "getDefaultSensor", Int::class.javaPrimitiveType,
                 object : XC_MethodHook() {
@@ -491,7 +626,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook SensorManager.getDefaultSensor(int, boolean)
             try {
                 XposedHelpers.findAndHookMethod(
                     SensorManager::class.java, "getDefaultSensor",
@@ -519,14 +653,10 @@ class EmulatorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook 电话状态检测 - 伪装为真实设备
-     */
     private fun hookTelephonyDetection() {
         try {
             val tmClass = android.telephony.TelephonyManager::class.java
 
-            // IMEI 相关
             val imeiMethods = listOf(
                 "getDeviceId", "getImei", "getMeid"
             )
@@ -540,7 +670,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                             }
                         }
                     )
-                    // 带 slotId 的重载
                     try {
                         XposedHelpers.findAndHookMethod(
                             tmClass, method, Int::class.javaPrimitiveType,
@@ -565,7 +694,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 )
             } catch (_: Exception) {}
 
-            // SIM 序列号
             try {
                 XposedHelpers.findAndHookMethod(
                     tmClass, "getSimSerialNumber",
@@ -577,7 +705,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 )
             } catch (_: Exception) {}
 
-            // 电话号码
             try {
                 XposedHelpers.findAndHookMethod(
                     tmClass, "getLine1Number",
@@ -589,7 +716,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 )
             } catch (_: Exception) {}
 
-            // 运营商信息（根据 GPS 坐标动态推断）
             val operatorInfo = getOperatorInfoForLocation()
             val operatorOverrides = mapOf(
                 "getNetworkOperator" to operatorInfo.networkOperator,
@@ -612,7 +738,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 } catch (_: Exception) {}
             }
 
-            // 电话类型
             try {
                 XposedHelpers.findAndHookMethod(
                     tmClass, "getPhoneType",
@@ -624,7 +749,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 )
             } catch (_: Exception) {}
 
-            // 网络类型
             try {
                 XposedHelpers.findAndHookMethod(
                     tmClass, "getNetworkType",
@@ -642,12 +766,8 @@ class EmulatorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook 硬件检测 - 伪装 CPU 和内存
-     */
     private fun hookHardwareDetection() {
         try {
-            // Hook Runtime.availableProcessors()
             XposedHelpers.findAndHookMethod(
                 Runtime::class.java, "availableProcessors",
                 object : XC_MethodHook() {
@@ -657,7 +777,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook ActivityManager.getMemoryInfo()
             try {
                 val amClass = android.app.ActivityManager::class.java
                 val miClass = android.app.ActivityManager.MemoryInfo::class.java
@@ -673,24 +792,17 @@ class EmulatorHooks : HookEntry.HookHandler {
                 )
             } catch (_: Exception) {}
 
-            // Hook android.os.Build.VERSION_CODES 处理
-            // 确保 API 版本检查不会暴露模拟器
-
             HookUtils.logDebug("$TAG: 硬件检测已 Hook")
         } catch (e: Exception) {
             HookUtils.log("$TAG: 硬件检测 Hook 失败: ${e.message}")
         }
     }
 
-    /**
-     * Hook Settings 检测 - 隐藏模拟器设置
-     */
     private fun hookSettingsDetection() {
         try {
             val settingsSecureClass = android.provider.Settings.Secure::class.java
             val settingsGlobalClass = android.provider.Settings.Global::class.java
 
-            // Hook Settings.Secure.getString
             XposedHelpers.findAndHookMethod(
                 settingsSecureClass, "getString",
                 android.content.ContentResolver::class.java, String::class.java,
@@ -699,7 +811,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                         val key = param.args[1] as? String ?: return
                         when (key) {
                             "android_id" -> {
-                                // 生成随机但有效的 android_id
                                 param.result = generateAndroidId()
                             }
                             "mock_location" -> {
@@ -710,7 +821,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook Settings.Secure.getInt
             XposedHelpers.findAndHookMethod(
                 settingsSecureClass, "getInt",
                 android.content.ContentResolver::class.java, String::class.java,
@@ -725,7 +835,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook Settings.Global.getString
             XposedHelpers.findAndHookMethod(
                 settingsGlobalClass, "getString",
                 android.content.ContentResolver::class.java, String::class.java,
@@ -740,7 +849,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook Settings.Global.getInt
             XposedHelpers.findAndHookMethod(
                 settingsGlobalClass, "getInt",
                 android.content.ContentResolver::class.java, String::class.java,
@@ -761,24 +869,8 @@ class EmulatorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * Hook Native 层系统属性读取
-     * 注意: Xposed 框架无法直接 Hook native 函数
-     * 需要通过其他方式处理，如 Magisk 模块或 XposedBridge 的 native hook
-     */
     private fun hookNativeProperties() {
         try {
-            // Xposed 框架主要处理 Java 层
-            // Native 层的 __system_property_get 需要通过以下方式处理:
-            // 1. 使用 Magisk 模块修改系统属性 (resetprop)
-            // 2. 使用 LSPosed 的 native hook 功能
-            // 3. 通过 JNI 调用修改属性值
-
-            // 这里我们通过 Hook SystemProperties 来间接处理
-            // 大部分应用会通过 SystemProperties Java API 读取属性
-            // 对于直接通过 JNI 调用 __system_property_get 的应用
-            // 需要配合 Magisk 模块使用
-
             HookUtils.logDebug("$TAG: Native 属性读取已处理 (通过 SystemProperties Hook)")
         } catch (e: Exception) {
             HookUtils.log("$TAG: Native 属性读取处理失败: ${e.message}")
@@ -787,12 +879,6 @@ class EmulatorHooks : HookEntry.HookHandler {
 
     private fun generateAndroidId(): String = getRandomAndroidID()
 
-    /**
-     * 根据 GPS 坐标推断国家/地区，返回对应的运营商信息
-     * 中国：460/中国移动/中国联通/中国电信
-     * 美国：310/T-Mobile/AT&T/Verizon
-     * 其他地区：使用默认值（中国）
-     */
     private data class OperatorInfo(
         val networkOperator: String,
         val networkOperatorName: String,
@@ -808,7 +894,6 @@ class EmulatorHooks : HookEntry.HookHandler {
             val lon = com.dingtalk.helper.utils.ConfigManager.getLongitude()
 
             when {
-                // 中国地区：纬度 18-54，经度 73-135
                 lat in 18.0..54.0 && lon in 73.0..135.0 -> OperatorInfo(
                     networkOperator = "46000",
                     networkOperatorName = "中国移动",
@@ -817,7 +902,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                     networkCountryIso = "cn",
                     simCountryIso = "cn"
                 )
-                // 美国地区：纬度 24-49，经度 -125..-66
                 lat in 24.0..49.0 && lon in -125.0..-66.0 -> OperatorInfo(
                     networkOperator = "310260",
                     networkOperatorName = "T-Mobile",
@@ -826,7 +910,6 @@ class EmulatorHooks : HookEntry.HookHandler {
                     networkCountryIso = "us",
                     simCountryIso = "us"
                 )
-                // 其他地区：默认使用中国运营商
                 else -> OperatorInfo(
                     networkOperator = "46000",
                     networkOperatorName = "中国移动",

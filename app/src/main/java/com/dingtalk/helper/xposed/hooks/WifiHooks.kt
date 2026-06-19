@@ -6,6 +6,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
+import com.dingtalk.helper.xposed.data.WiFiScanResultGenerator
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
@@ -16,7 +17,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 
 /**
  * WiFi 信息伪造 Hook
- * 负责拦截和替换 WiFi 信息
+ * 负责拦截和替换 WiFi 信息，生成真实感的周围 WiFi 环境
  */
 class WifiHooks : HookEntry.HookHandler {
 
@@ -122,6 +123,48 @@ class WifiHooks : HookEntry.HookHandler {
                 }
             )
 
+            // Hook getRssi - 返回伪造的信号强度
+            XposedHelpers.findAndHookMethod(
+                wifiInfoClass,
+                "getRssi",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        val correlated = ConfigManager.getCorrelatedWifiInfo()
+                        return if (correlated.ssid.isNotEmpty()) correlated.rssi else
+                            XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args)
+                    }
+                }
+            )
+
+            // Hook getFrequency - 返回伪造的频率
+            XposedHelpers.findAndHookMethod(
+                wifiInfoClass,
+                "getFrequency",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        val correlated = ConfigManager.getCorrelatedWifiInfo()
+                        return if (correlated.ssid.isNotEmpty()) correlated.frequency else
+                            XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args)
+                    }
+                }
+            )
+
+            // Hook getLinkSpeed - 返回伪造的连接速度
+            XposedHelpers.findAndHookMethod(
+                wifiInfoClass,
+                "getLinkSpeed",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        val correlated = ConfigManager.getCorrelatedWifiInfo()
+                        if (correlated.ssid.isNotEmpty()) {
+                            // 根据频率返回合理的连接速度
+                            return if (correlated.frequency >= 5000) 433 else 72
+                        }
+                        return XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args)
+                    }
+                }
+            )
+
             HookUtils.log("$TAG: WifiInfo Hook 完成")
         } catch (e: Exception) {
             HookUtils.log("$TAG: WifiInfo Hook 失败: ${e.message}")
@@ -145,11 +188,23 @@ class WifiHooks : HookEntry.HookHandler {
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (shouldHook()) {
-                            val originalResults = param.result as? List<ScanResult>
-                            val fakeResults = createFakeScanResults(originalResults)
-                            param.result = fakeResults
-                            HookUtils.logDebug("$TAG: getScanResults 已替换")
+                            val fakeResults = generateRealisticScanResults()
+                            if (fakeResults.isNotEmpty()) {
+                                param.result = fakeResults
+                                HookUtils.logDebug("$TAG: getScanResults 已替换，${fakeResults.size} 个 AP")
+                            }
                         }
+                    }
+                }
+            )
+
+            // Hook startScan - 返回 true 但不实际触发扫描
+            XposedHelpers.findAndHookMethod(
+                wifiManagerClass,
+                "startScan",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        return true
                     }
                 }
             )
@@ -158,6 +213,47 @@ class WifiHooks : HookEntry.HookHandler {
         } catch (e: Exception) {
             HookUtils.log("$TAG: ScanResults Hook 失败: ${e.message}")
         }
+    }
+
+    /**
+     * 生成真实感的 WiFi 扫描结果
+     * 使用 WiFiScanResultGenerator 基于 GPS 坐标确定性生成
+     */
+    private fun generateRealisticScanResults(): List<ScanResult> {
+        val correlated = ConfigManager.getCorrelatedWifiInfo()
+        if (correlated.ssid.isEmpty()) return emptyList()
+
+        val lat = ConfigManager.getLatitude()
+        val lng = ConfigManager.getLongitude()
+
+        return try {
+            WiFiScanResultGenerator.generateScanResults(
+                lat = lat,
+                lng = lng,
+                connectedSsid = correlated.ssid,
+                connectedBssid = correlated.bssid
+            )
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: 生成扫描结果失败: ${e.message}")
+            // 回退：至少返回已连接的 WiFi
+            createMinimalScanResult(correlated)
+        }
+    }
+
+    /**
+     * 创建最小的扫描结果（仅已连接的 WiFi）
+     */
+    private fun createMinimalScanResult(correlated: ConfigManager.CorrelatedWifiInfo): List<ScanResult> {
+        return listOf(
+            ScanResult().apply {
+                SSID = correlated.ssid
+                BSSID = correlated.bssid
+                level = correlated.rssi
+                frequency = correlated.frequency
+                capabilities = "[WPA2-PSK-CCMP][ESS]"
+                timestamp = System.currentTimeMillis() * 1000
+            }
+        )
     }
 
     /**
@@ -179,6 +275,24 @@ class WifiHooks : HookEntry.HookHandler {
                 bssidField.set(wifiInfo, correlated.bssid)
             }
 
+            // 修改信号强度
+            try {
+                val rssiField = WifiInfo::class.java.getDeclaredField("mRssi")
+                rssiField.isAccessible = true
+                rssiField.setInt(wifiInfo, correlated.rssi)
+            } catch (e: Exception) {
+                // 忽略
+            }
+
+            // 修改频率
+            try {
+                val freqField = WifiInfo::class.java.getDeclaredField("mFrequency")
+                freqField.isAccessible = true
+                freqField.setInt(wifiInfo, correlated.frequency)
+            } catch (e: Exception) {
+                // 忽略
+            }
+
             // 隐藏 MAC 地址随机化标记
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 try {
@@ -192,34 +306,6 @@ class WifiHooks : HookEntry.HookHandler {
         } catch (e: Exception) {
             HookUtils.logDebug("$TAG: 修改 WifiInfo 失败: ${e.message}")
         }
-    }
-
-    /**
-     * 创建伪造的扫描结果
-     */
-    private fun createFakeScanResults(original: List<ScanResult>?): List<ScanResult> {
-        val results = original?.toMutableList() ?: mutableListOf()
-        val correlated = ConfigManager.getCorrelatedWifiInfo()
-
-        if (correlated.ssid.isEmpty()) return results
-
-        // 检查是否已存在目标 WiFi
-        val exists = results.any { it.SSID == correlated.ssid || (correlated.bssid.isNotEmpty() && it.BSSID == correlated.bssid) }
-
-        if (!exists) {
-            // 添加伪造的 WiFi 扫描结果
-            val fakeScanResult = ScanResult().apply {
-                SSID = correlated.ssid
-                BSSID = correlated.bssid
-                level = -50 // 信号强度
-                frequency = 2437 // 2.4GHz Channel 6
-                capabilities = "[WPA2-PSK-CCMP][ESS]"
-                timestamp = System.currentTimeMillis() * 1000
-            }
-            results.add(0, fakeScanResult)
-        }
-
-        return results
     }
 
     /**

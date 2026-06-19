@@ -59,13 +59,7 @@ class RiskControlHooks : HookEntry.HookHandler {
 
         fun generateDeterministicMac(): String {
             val seed = EmulatorHooks.getDeviceModel().hashCode().toLong() xor 0x4D414330L
-            val rng = java.util.Random(seed)
-            return String.format(
-                "%02X:%02X:%02X:%02X:%02X:%02X",
-                (rng.nextInt(254) + 1) and 0xFE,
-                rng.nextInt(256), rng.nextInt(256),
-                rng.nextInt(256), rng.nextInt(256), rng.nextInt(256)
-            )
+            return com.dingtalk.helper.xposed.data.RandomizedDeviceId.generateMacAddress(seed)
         }
 
         private fun sampleRiskScore(): Int {

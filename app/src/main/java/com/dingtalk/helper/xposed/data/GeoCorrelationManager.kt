@@ -13,7 +13,9 @@ import java.util.concurrent.ConcurrentHashMap
  * - 中国地区 MCC=460，MNC 根据区域推断（00=移动，01=联通，03=电信）
  * - LAC/CID 基于坐标哈希生成，保持一致性
  * - WiFi SSID：基于坐标的"区域名+编号"格式
- * - WiFi BSSID：基于坐标哈希的 MAC 地址
+ * - WiFi BSSID：使用常见路由器厂商 OUI 前缀的 MAC 地址
+ * - RSSI 基于模拟距离的信号衰减
+ * - 频率混合 2.4GHz 和 5GHz
  */
 object GeoCorrelationManager {
 
@@ -71,6 +73,48 @@ object GeoCorrelationManager {
     )
 
     /**
+     * 常见路由器厂商 OUI 前缀（3 字节）
+     */
+    private val routerOuiPrefixes = listOf(
+        byteArrayOf(0x78.toByte(), 0x8A.toByte(), 0x20.toByte()),  // TP-Link
+        byteArrayOf(0x48.toByte(), 0x5F.toByte(), 0x99.toByte()),  // Huawei
+        byteArrayOf(0x28.toByte(), 0x6C.toByte(), 0x07.toByte()),  // Xiaomi
+        byteArrayOf(0xAC.toByte(), 0x84.toByte(), 0xC6.toByte()),  // TP-Link (alt)
+        byteArrayOf(0x00.toByte(), 0x1A.toByte(), 0x11.toByte()),  // ZTE
+        byteArrayOf(0x14.toByte(), 0x75.toByte(), 0x5B.toByte()),  // ChinaTelecom
+        byteArrayOf(0xB0.toByte(), 0xBE.toByte(), 0x76.toByte()),  // TP-Link (v2)
+        byteArrayOf(0x5C.toByte(), 0x7D.toByte(), 0x5E.toByte()),  // Huawei (alt)
+        byteArrayOf(0xF8.toByte(), 0x3D.toByte(), 0xFF.toByte()),  // Huawei (alt2)
+        byteArrayOf(0xCC.toByte(), 0x2D.toByte(), 0x83.toByte()),  // Xiaomi (alt)
+        byteArrayOf(0x60.toByte(), 0xE3.toByte(), 0x27.toByte()),  // ChinaNet
+        byteArrayOf(0x38.toByte(), 0xF8.toByte(), 0x89.toByte()),  // Mercury
+        byteArrayOf(0x10.toByte(), 0xFE.toByte(), 0xED.toByte()),  // TP-Link (v3)
+        byteArrayOf(0x20.toByte(), 0xDC.toByte(), 0xE6.toByte()),  // Huawei (alt3)
+        byteArrayOf(0xD4.toByte(), 0x3D.toByte(), 0x7E.toByte()),  // Xiaomi (alt2)
+    )
+
+    /**
+     * SSID 前缀模式
+     */
+    private val ssidPrefixes = listOf(
+        "ChinaNet-", "CMCC-", "CU_",
+        "TP-Link_", "TP-LINK_",
+        "Xiaomi_", "HUAWEI_", "HUAWEI-B315-",
+        "Tenda_", "FAST_", "MERCURY_",
+        "ZTE-", "ChinaUnicom-",
+    )
+
+    /**
+     * 2.4GHz 频率表
+     */
+    private val freq2g4 = intArrayOf(2412, 2437, 2462) // Ch 1, 6, 11
+
+    /**
+     * 5GHz 频率表
+     */
+    private val freq5g = intArrayOf(5180, 5200, 5220, 5745, 5765) // Ch 36, 40, 44, 149, 153
+
+    /**
      * 根据 GPS 坐标获取关联的 WiFi 信息
      * 同一坐标始终返回相同结果（确定性）
      */
@@ -94,6 +138,7 @@ object GeoCorrelationManager {
 
     /**
      * 生成关联的 WiFi 信息
+     * 使用真实 OUI 前缀 + 确定性随机生成 RSSI 和频率
      */
     private fun generateCorrelatedWifi(lat: Double, lng: Double): CorrelatedWifiInfo {
         val hash = coordinateHash(lat, lng)
@@ -103,39 +148,102 @@ object GeoCorrelationManager {
         val ssidIndex = (hash[0].toInt() and 0xFF) * 100 + (hash[1].toInt() and 0xFF)
         val ssid = "${regionName}_${String.format("%03d", ssidIndex % 1000)}"
 
-        // BSSID: 基于哈希的 MAC 地址，设置 locally administered bit
-        val bssidBytes = hash.copyOf(6)
-        bssidBytes[0] = (bssidBytes[0].toInt() or 0x02).toByte() // locally administered
-        bssidBytes[0] = (bssidBytes[0].toInt() and 0xFE).toByte() // unicast
-        val bssid = bssidBytes.joinToString(":") { String.format("%02X", it) }
+        // BSSID: 使用真实 OUI 前缀
+        val ouiIndex = (hash[2].toInt() and 0xFF) % routerOuiPrefixes.size
+        val oui = routerOuiPrefixes[ouiIndex]
+        val b4 = (hash[3].toInt() and 0xFF)
+        val b5 = (hash[4].toInt() and 0xFF)
+        val b6 = (hash[5].toInt() and 0xFF)
+        val bssid = String.format(
+            "%02X:%02X:%02X:%02X:%02X:%02X",
+            oui[0].toInt() and 0xFF,
+            oui[1].toInt() and 0xFF,
+            oui[2].toInt() and 0xFF,
+            b4, b5, b6
+        )
 
-        return CorrelatedWifiInfo(ssid = ssid, bssid = bssid)
+        // RSSI: 模拟连接的 WiFi（较强信号）
+        val rssiBase = (hash[6].toInt() and 0x1F) // 0-31
+        val rssi = -55 + (rssiBase % 16) // -55 to -39
+
+        // 频率: 基于哈希选择 2.4GHz 或 5GHz
+        val freqChoice = hash[7].toInt() and 0xFF
+        val frequency = if (freqChoice % 3 == 0) {
+            freq5g[freqChoice % freq5g.size]
+        } else {
+            freq2g4[freqChoice % freq2g4.size]
+        }
+
+        // 邻居 BSSID: 2-3 个附近 AP
+        val neighborCount = 2 + (hash[8].toInt() and 0xFF) % 2 // 2-3 个
+        val neighborBssids = mutableListOf<String>()
+        for (i in 0 until neighborCount) {
+            val nHash = coordinateHash(lat + (i + 1) * 0.0001, lng + (i + 1) * 0.0001)
+            val nOui = routerOuiPrefixes[(nHash[0].toInt() and 0xFF) % routerOuiPrefixes.size]
+            val nbssid = String.format(
+                "%02X:%02X:%02X:%02X:%02X:%02X",
+                nOui[0].toInt() and 0xFF,
+                nOui[1].toInt() and 0xFF,
+                nOui[2].toInt() and 0xFF,
+                (nHash[3].toInt() and 0xFF),
+                (nHash[4].toInt() and 0xFF),
+                (nHash[5].toInt() and 0xFF)
+            )
+            neighborBssids.add(nbssid)
+        }
+
+        // 邻居 RSSI: 接近但略弱
+        val neighborRssi = rssi - 5 - (hash[9].toInt() and 0x0F) // 比主 AP 弱 5-20dB
+
+        // 邻居频率
+        val neighborFreq = if (freqChoice % 2 == 0) {
+            freq2g4[(freqChoice / 2) % freq2g4.size]
+        } else {
+            freq5g[(freqChoice / 3) % freq5g.size]
+        }
+
+        return CorrelatedWifiInfo(
+            ssid = ssid,
+            bssid = bssid,
+            rssi = rssi,
+            frequency = frequency,
+            neighborBssids = neighborBssids,
+            neighborRssi = neighborRssi.coerceIn(-90, -40),
+            neighborFrequency = neighborFreq
+        )
     }
 
     /**
      * 生成关联的基站信息
      */
     private fun generateCorrelatedCell(lat: Double, lng: Double): CorrelatedCellInfo {
-        val hash = coordinateHash(lat, lng)
         val regionName = getRegionName(lat, lng)
-
-        // MCC: 中国固定 460
         val mcc = 460
-
-        // MNC: 根据区域推断
         val mnc = regionToMnc[regionName] ?: 0
 
-        // LAC: 基于哈希，范围 1-65535
-        val lac = ((hash[2].toInt() and 0xFF) shl 8 or (hash[3].toInt() and 0xFF)).coerceIn(1, 65535)
+        val bundle = CellTowerGenerator.generate(lat, lng, mcc, mnc)
+        val serving = bundle.serving
 
-        // CID: 基于哈希，范围 1-65535（真实 CID 范围更广，但使用此范围以兼容 GSM）
-        val cid = ((hash[4].toInt() and 0xFF) shl 8 or (hash[5].toInt() and 0xFF)).coerceIn(1, 65535)
+        val neighbors = bundle.neighbors.map { n ->
+            NeighborCell(
+                cellType = n.cellType,
+                cellId = n.cellId,
+                lac = n.lac,
+                tac = n.tac,
+                rssi = n.rssi,
+                pci = n.pci,
+                earfcn = n.earfcn
+            )
+        }
 
         return CorrelatedCellInfo(
             mcc = mcc,
             mnc = mnc,
-            lac = lac,
-            cellId = cid
+            lac = serving.lac,
+            cellId = serving.cellId,
+            tac = serving.tac,
+            rssi = serving.rssi,
+            neighborCells = neighbors
         )
     }
 
@@ -186,13 +294,31 @@ object GeoCorrelationManager {
 
     data class CorrelatedWifiInfo(
         val ssid: String,
-        val bssid: String
+        val bssid: String,
+        val rssi: Int = -50,
+        val frequency: Int = 2437,
+        val neighborBssids: List<String> = emptyList(),
+        val neighborRssi: Int = -65,
+        val neighborFrequency: Int = 2437
     )
 
     data class CorrelatedCellInfo(
         val mcc: Int,
         val mnc: Int,
         val lac: Int,
-        val cellId: Int
+        val cellId: Int,
+        val tac: Int = 0,
+        val rssi: Int = -70,
+        val neighborCells: List<NeighborCell> = emptyList()
+    )
+
+    data class NeighborCell(
+        val cellType: CellTowerGenerator.CellType,
+        val cellId: Int,
+        val lac: Int,
+        val tac: Int,
+        val rssi: Int,
+        val pci: Int,
+        val earfcn: Int
     )
 }

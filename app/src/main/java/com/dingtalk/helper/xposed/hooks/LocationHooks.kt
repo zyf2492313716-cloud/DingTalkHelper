@@ -8,6 +8,7 @@ import android.os.Build
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
 import com.dingtalk.helper.xposed.data.FakeDataProvider
+import com.dingtalk.helper.xposed.data.TimingManager
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookLogger
 import com.dingtalk.helper.xposed.utils.HookUtils
@@ -15,9 +16,6 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.TimeUnit
 
 /**
  * GPS 位置伪造 Hook
@@ -37,12 +35,6 @@ class LocationHooks : HookEntry.HookHandler {
 
     companion object {
         private const val TAG = "${Constants.LOG_PREFIX}:Location"
-
-        // 定时任务管理
-        private val scheduledExecutor = Executors.newSingleThreadScheduledExecutor { r ->
-            Thread(r, "LocationHooks-Scheduler").apply { isDaemon = true }
-        }
-        private val activeTasks = java.util.concurrent.ConcurrentHashMap<Any, ScheduledFuture<*>>()
 
         fun getCurrentFakeLocation(): ConfigManager.FakeLocation {
             return FakeDataProvider.getCurrentFakeLocation()
@@ -64,16 +56,11 @@ class LocationHooks : HookEntry.HookHandler {
 
         fun reset() {
             FakeDataProvider.resetLocation()
-            activeTasks.values.forEach { it.cancel(false) }
-            activeTasks.clear()
+            TimingManager.cancelAll()
         }
 
-        /**
-         * 清理所有定时任务
-         */
         fun cleanup() {
-            activeTasks.values.forEach { it.cancel(false) }
-            activeTasks.clear()
+            TimingManager.cancelAll()
         }
     }
 
@@ -219,17 +206,16 @@ class LocationHooks : HookEntry.HookHandler {
         minTimeMs: Long,
         callback: (Location) -> Unit
     ) {
-        cancelLocationUpdates(listener)
-        val intervalMs = maxOf(minTimeMs, 1000L)
-        val future = scheduledExecutor.scheduleAtFixedRate({
+        val key = "location_${listener.hashCode()}"
+        TimingManager.cancelTask(key)
+        TimingManager.startLocationUpdates(key, minTimeMs) {
             try {
                 val location = getOrCreateFakeLocation()
                 callback(location)
             } catch (e: Exception) {
                 HookLogger.logDebug(TAG, "定时位置更新失败: ${e.message}")
             }
-        }, 100, intervalMs, TimeUnit.MILLISECONDS)
-        activeTasks[listener] = future
+        }
     }
 
     private fun schedulePendingIntentUpdates(
@@ -237,9 +223,9 @@ class LocationHooks : HookEntry.HookHandler {
         pendingIntent: android.app.PendingIntent,
         minTimeMs: Long
     ) {
-        cancelLocationUpdates(key)
-        val intervalMs = maxOf(minTimeMs, 1000L)
-        val future = scheduledExecutor.scheduleAtFixedRate({
+        val taskKey = "pending_${pendingIntent.hashCode()}"
+        TimingManager.cancelTask(taskKey)
+        TimingManager.startLocationUpdates(taskKey, minTimeMs) {
             try {
                 val location = getOrCreateFakeLocation()
                 val intent = android.content.Intent().apply {
@@ -250,12 +236,7 @@ class LocationHooks : HookEntry.HookHandler {
             } catch (e: Exception) {
                 HookLogger.logDebug(TAG, "定时 PendingIntent 更新失败: ${e.message}")
             }
-        }, 100, intervalMs, TimeUnit.MILLISECONDS)
-        activeTasks[key] = future
-    }
-
-    private fun cancelLocationUpdates(key: Any) {
-        activeTasks.remove(key)?.cancel(false)
+        }
     }
 
     private fun hookRequestLocationUpdates(clazz: Class<*>) {
@@ -369,7 +350,7 @@ class LocationHooks : HookEntry.HookHandler {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val listener = param.args[0] ?: return
-                        cancelLocationUpdates(listener)
+                        TimingManager.cancelTask("location_${listener.hashCode()}")
                     }
                 }
             )
@@ -390,7 +371,7 @@ class LocationHooks : HookEntry.HookHandler {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val pendingIntent = param.args[0] ?: return
-                        cancelLocationUpdates(pendingIntent)
+                        TimingManager.cancelTask("pending_${pendingIntent.hashCode()}")
                     }
                 }
             )
@@ -478,7 +459,8 @@ class LocationHooks : HookEntry.HookHandler {
                         HookLogger.logDebug(TAG, "GNSS 状态回调 onStarted 失败: ${e.message}")
                     }
 
-                    scheduledExecutor.schedule({
+                    val statusKey = "gnss_status_${callback.hashCode()}"
+                    TimingManager.scheduleOnce(statusKey, 200) {
                         try {
                             val fakeStatus = createFakeGnssStatus()
                             callback.onFirstFix(0)
@@ -486,7 +468,7 @@ class LocationHooks : HookEntry.HookHandler {
                         } catch (e: Exception) {
                             HookLogger.logDebug(TAG, "GNSS 状态回调失败: ${e.message}")
                         }
-                    }, 200, TimeUnit.MILLISECONDS)
+                    }
                 }
             }
         }
@@ -534,7 +516,8 @@ class LocationHooks : HookEntry.HookHandler {
                                     HookLogger.logDebug(TAG, "GNSS 状态回调 onStarted 失败: ${e.message}")
                                 }
 
-                                scheduledExecutor.schedule({
+                                val statusKey = "gnss_status_exec_${callback.hashCode()}"
+                                TimingManager.scheduleOnce(statusKey, 200) {
                                     try {
                                         val fakeStatus = createFakeGnssStatus()
                                         callback.onFirstFix(0)
@@ -542,7 +525,7 @@ class LocationHooks : HookEntry.HookHandler {
                                     } catch (e: Exception) {
                                         HookLogger.logDebug(TAG, "GNSS 状态回调失败: ${e.message}")
                                     }
-                                }, 200, TimeUnit.MILLISECONDS)
+                                }
                             }
                         }
                     }

@@ -4,15 +4,13 @@ import android.os.Build
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
 import com.dingtalk.helper.xposed.data.FakeDataProvider
+import com.dingtalk.helper.xposed.data.TimingManager
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookLogger
 import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.TimeUnit
 
 /**
  * NMEA 0183 语句生成器 Hook
@@ -27,12 +25,6 @@ class NmeaHooks : HookEntry.HookHandler {
 
     companion object {
         private const val TAG = "${Constants.LOG_PREFIX}:NMEA"
-
-        // 定时任务管理
-        private val scheduledExecutor = Executors.newSingleThreadScheduledExecutor { r ->
-            Thread(r, "NmeaHooks-Scheduler").apply { isDaemon = true }
-        }
-        private val activeTasks = java.util.concurrent.ConcurrentHashMap<Any, ScheduledFuture<*>>()
 
         fun generateGPGGA(location: ConfigManager.FakeLocation, timestamp: Long): String {
             return FakeDataProvider.generateNmeaGGA(location, timestamp)
@@ -88,9 +80,8 @@ class NmeaHooks : HookEntry.HookHandler {
             intervalMs: Long,
             callback: (String, Long) -> Unit
         ) {
-            cancelNmeaUpdates(key)
-            val interval = maxOf(intervalMs, 1000L)
-            val future = scheduledExecutor.scheduleAtFixedRate({
+            val taskKey = "nmea_${key.hashCode()}"
+            TimingManager.startNmeaUpdates(taskKey, intervalMs) {
                 try {
                     val location = getCurrentFakeLocation()
                     val timestamp = System.currentTimeMillis()
@@ -101,20 +92,11 @@ class NmeaHooks : HookEntry.HookHandler {
                 } catch (e: Exception) {
                     HookLogger.logDebug(TAG, "定时 NMEA 更新失败: ${e.message}")
                 }
-            }, 100, interval, TimeUnit.MILLISECONDS)
-            activeTasks[key] = future
+            }
         }
 
-        private fun cancelNmeaUpdates(key: Any) {
-            activeTasks.remove(key)?.cancel(false)
-        }
-
-        /**
-         * 清理所有定时任务
-         */
         fun cleanup() {
-            activeTasks.values.forEach { it.cancel(false) }
-            activeTasks.clear()
+            TimingManager.cancelAll()
         }
     }
 
@@ -252,7 +234,7 @@ class NmeaHooks : HookEntry.HookHandler {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val listener = param.args[0] ?: return
-                        cancelNmeaUpdates(listener)
+                        TimingManager.cancelTask("nmea_${listener.hashCode()}")
                     }
                 }
             )
