@@ -19,7 +19,7 @@ import java.net.NetworkInterface
 
 /**
  * 高级反检测 Hook 模块
- * 补全 EnvironmentHooks / EmulatorHooks / AppHidingHooks 未覆盖的检测点
+ * 补全 EnvironmentHooks / EmulatorHooks / AppHidingHooks / DeepHidingHooks 未覆盖的检测点
  *
  * 职责：
  * - PackageManager 查询增强过滤（虚拟定位工具包名）
@@ -29,6 +29,7 @@ import java.net.NetworkInterface
  * - ActivityManager.getRunningAppProcesses() 进程信息过滤
  * - Runtime.exec / ProcessBuilder 拦截 /proc/self/maps 等敏感文件读取
  * - Build.getSerial() 序列号伪装（API 26+）
+ * - VPN/代理痕迹隐藏
  *
  * 线程安全：所有 Hook 回调由 Xposed 框架在主线程或 Binder 线程分发，
  * 共享只读集合（HIDDEN_PACKAGES / SENSITIVE_PATHS 等）无需额外同步。
@@ -46,6 +47,8 @@ class AdvancedAntiDetectionHooks : HookEntry.HookHandler {
             "io.github.lsposed.manager",
             // Magisk（补充）
             "com.topjohnwu.magiskelta",
+            "io.github.vvb2060.magisk",
+            "io.github.huskydg.magisk",
             // Hide My Applist
             "com.tsng.hidemyapplist",
             "com.tsng.hidemyapplist.xposed",
@@ -62,7 +65,9 @@ class AdvancedAntiDetectionHooks : HookEntry.HookHandler {
             "com.koushikdutta.superuser",
             "com.noshufou.android.su",
             "com.thirdparty.superuser",
-            "com.topjohnwu.libsu"
+            "com.topjohnwu.libsu",
+            // KernelSU
+            "me.weishu.kernelsu"
         )
 
         // Settings.Secure 需要隐藏为 0 的键
@@ -123,16 +128,39 @@ class AdvancedAntiDetectionHooks : HookEntry.HookHandler {
             Regex("\\bsu\\b")
         )
 
-        // 进程名中需要隐藏的关键词
+        // 进程名中需要隐藏的关键词（扩展版）
         private val HIDDEN_PROCESS_KEYWORDS = setOf(
             "xposed", "lsposed", "edxposed", "riru",
             "magisk", "zygisk", "lsplant",
-            "dingtalk.helper", "hidemyapplist"
+            "dingtalk.helper", "hidemyapplist",
+            // 补充：更多隐藏关键词
+            "kernelsu", "apatch", "frida", "substrate"
         )
 
         // 模拟器异常网卡名称前缀
         private val EMULATOR_INTERFACE_PREFIXES = setOf(
             "eth", "sit", "tun", "tap", "vbox"
+        )
+
+        // VPN/代理相关应用包名（隐藏痕迹）
+        private val VPN_PACKAGES = setOf(
+            "org.piavpn.piavpn",
+            "com.nordvpn.android",
+            "com.expressvpn.vpn",
+            "com.wireguard.android",
+            "de.blinkt.openvpn",
+            "net.openvpn.openvpn",
+            "com.surfshark.vpnclient.android",
+            "com.protonvpn.android",
+            "com.windscribe.vpn",
+            "com.cloudflare.onedotonedotonedotone",
+            "ch.protonvpn.android"
+        )
+
+        // VPN/代理相关进程关键词
+        private val VPN_PROCESS_KEYWORDS = setOf(
+            "vpn", "wireguard", "openvpn", "clash", "v2ray",
+            "shadowsocks", "trojan", "sing-box", "naiveproxy"
         )
     }
 
@@ -150,6 +178,7 @@ class AdvancedAntiDetectionHooks : HookEntry.HookHandler {
             hookRuntimeExecForProc(lpparam)
             hookProcessBuilderForProc(lpparam)
             hookBuildSerial(lpparam)
+            hookVpnHiding(lpparam)
 
             HookUtils.log("$TAG: 高级反检测 Hook 注入完成")
         } catch (e: Exception) {
@@ -891,6 +920,57 @@ class AdvancedAntiDetectionHooks : HookEntry.HookHandler {
             HookUtils.log("$TAG: Build.getSerial() Hook 完成")
         } catch (e: Exception) {
             HookUtils.logDebug("$TAG: Build.getSerial() Hook 失败: ${e.message}")
+        }
+    }
+
+    // ==================== 6. VPN/代理痕迹隐藏 ====================
+
+    /**
+     * 隐藏 VPN/代理相关痕迹
+     * 防止通过 VPN 连接检测模块使用
+     */
+    private fun hookVpnHiding(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            // 隐藏 VPN 相关应用包名
+            val pmClass = XposedHelpers.findClass(
+                "android.app.ApplicationPackageManager", lpparam.classLoader
+            )
+
+            XposedHelpers.findAndHookMethod(
+                pmClass, "getInstalledPackages", Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val packages = param.result as? List<*> ?: return
+                        param.result = packages.filter { pkg ->
+                            val pn = HookUtils.getFieldValueSafely(pkg!!, "packageName") as? String ?: ""
+                            pn !in VPN_PACKAGES
+                        }
+                    }
+                }
+            )
+
+            // 隐藏 VPN 进程
+            try {
+                val amClass = android.app.ActivityManager::class.java
+                XposedHelpers.findAndHookMethod(
+                    amClass, "getRunningAppProcesses",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val processes = param.result as? List<*> ?: return
+                            param.result = processes.filter { proc ->
+                                val processName = try {
+                                    XposedHelpers.getObjectField(proc, "processName") as? String ?: ""
+                                } catch (_: Exception) { "" }
+                                !VPN_PROCESS_KEYWORDS.any { processName.lowercase().contains(it) }
+                            }
+                        }
+                    }
+                )
+            } catch (_: Exception) {}
+
+            HookUtils.log("$TAG: VPN/代理痕迹隐藏完成")
+        } catch (e: Exception) {
+            HookUtils.log("$TAG: VPN/代理痕迹隐藏失败: ${e.message}")
         }
     }
 

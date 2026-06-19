@@ -17,4 +17,30 @@
     <string name="hide_mock_location">隐藏模拟位置标记</string>
     <string name="save">保存</string>
     <string name="reset">重置</string>
+
+    <string name="map_picker">地图选点</string>
+    <string name="map_picker_title">点击地图选择位置</string>
+    <string name="validate_config">验证配置</string>
+    <string name="config_valid">配置有效</string>
+    <string name="config_invalid">配置无效</string>
+    <string name="quick_config">快速配置</string>
+    <string name="quick_config_company">公司</string>
+    <string name="quick_config_home">家</string>
+    <string name="quick_config_from_clipboard">从剪贴板导入</string>
+    <string name="quick_config_current_location">获取当前位置</string>
+    <string name="quick_config_presets">预设位置</string>
+    <string name="import_export">导入/导出</string>
+    <string name="export_config">导出配置</string>
+    <string name="import_config">导入配置</string>
+    <string name="export_success">配置已导出到剪贴板</string>
+    <string name="import_success">配置已导入</string>
+    <string name="import_failed">导入失败：格式无效</string>
+    <string name="status_title">Hook 模块状态</string>
+    <string name="status_active">生效</string>
+    <string name="status_inactive">未生效</string>
+    <string name="status_unknown">未知</string>
+    <string name="hot_reload">热更新配置</string>
+    <string name="hot_reload_hint">保存后自动通知目标进程重新加载</string>
+    <string name="config_saved_hot">配置已保存并热更新</string>
+    <string name="config_saved_restart">配置已保存，重启钉钉后生效</string>
 </resources>

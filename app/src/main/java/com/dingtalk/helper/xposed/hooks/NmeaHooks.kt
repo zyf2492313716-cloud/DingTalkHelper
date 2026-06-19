@@ -5,6 +5,7 @@ import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
 import com.dingtalk.helper.xposed.data.FakeDataProvider
 import com.dingtalk.helper.xposed.utils.Constants
+import com.dingtalk.helper.xposed.utils.HookLogger
 import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedHelpers
@@ -17,13 +18,10 @@ import java.util.concurrent.TimeUnit
  * NMEA 0183 语句生成器 Hook
  * 负责拦截和替换 GNSS NMEA 数据
  *
- * 生成的 NMEA 语句：
- * - $GPGGA: 定位数据（时间、经纬度、质量、卫星数、海拔）
- * - $GPRMC: 推荐最小定位（含速度、日期、磁偏角）
- * - $GPGSV: 可见卫星信息（PRN、仰角、方位角、信噪比）
- * - $GPGSA: DOP 值和活动卫星
- *
- * 参考 Portal 项目的 NMEA 实现
+ * 优化特性：
+ * - 统一定时任务管理
+ * - 精确错误处理
+ * - 定时任务生命周期管理
  */
 class NmeaHooks : HookEntry.HookHandler {
 
@@ -100,7 +98,9 @@ class NmeaHooks : HookEntry.HookHandler {
                     sentences.forEach { sentence ->
                         callback(sentence, timestamp)
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    HookLogger.logDebug(TAG, "定时 NMEA 更新失败: ${e.message}")
+                }
             }, 100, interval, TimeUnit.MILLISECONDS)
             activeTasks[key] = future
         }
@@ -108,24 +108,32 @@ class NmeaHooks : HookEntry.HookHandler {
         private fun cancelNmeaUpdates(key: Any) {
             activeTasks.remove(key)?.cancel(false)
         }
+
+        /**
+         * 清理所有定时任务
+         */
+        fun cleanup() {
+            activeTasks.values.forEach { it.cancel(false) }
+            activeTasks.clear()
+        }
     }
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (!ConfigManager.isEnabled()) return
 
-        HookUtils.log("$TAG: 开始注入 NMEA 伪造 Hook")
+        HookLogger.logInfo(TAG, "开始注入 NMEA 伪造 Hook")
 
         val locationManagerClass = try {
             XposedHelpers.findClass("android.location.LocationManager", lpparam.classLoader)
         } catch (e: ClassNotFoundException) {
-            HookUtils.log("$TAG: 找不到 LocationManager 类")
+            HookLogger.logFailure(TAG, "LocationManager 类不存在")
             return
         }
 
         hookRegisterGnssNmeaCallback(locationManagerClass, lpparam)
         hookOnNmeaReceived(lpparam)
 
-        HookUtils.log("$TAG: NMEA Hook 注入完成")
+        HookLogger.logSuccess(TAG)
     }
 
     /**
@@ -163,7 +171,7 @@ class NmeaHooks : HookEntry.HookHandler {
                     invokeOnNmeaReceived(listener, timestamp, sentence)
                 }
 
-                HookUtils.log("$TAG: registerGnssNmeaCallback(Listener, Handler) Hook 完成")
+                HookLogger.logDebug(TAG, "registerGnssNmeaCallback(Listener, Handler) 已拦截")
             }
         }
 
@@ -177,10 +185,11 @@ class NmeaHooks : HookEntry.HookHandler {
                 android.os.Handler::class.java,
                 hookNmeaCallback
             )
+            HookLogger.logSuccess("registerGnssNmeaCallback(Listener, Handler)")
         } catch (e: NoSuchMethodError) {
-            HookUtils.log("$TAG: registerGnssNmeaCallback(Listener, Handler) 方法不存在")
+            HookLogger.logFailure("registerGnssNmeaCallback(Listener, Handler)", "方法不存在: ${e.message}")
         } catch (e: Exception) {
-            HookUtils.log("$TAG: registerGnssNmeaCallback(Listener, Handler) Hook 失败: ${e.message}")
+            HookLogger.logFailure("registerGnssNmeaCallback(Listener, Handler)", "Hook 失败", e)
         }
 
         // API 26+ (Android O): (Executor, GnssNmeaListener) 签名
@@ -214,14 +223,15 @@ class NmeaHooks : HookEntry.HookHandler {
                                 }
                             }
 
-                            HookUtils.log("$TAG: registerGnssNmeaCallback(Executor, Listener) Hook 完成")
+                            HookLogger.logDebug(TAG, "registerGnssNmeaCallback(Executor, Listener) 已拦截")
                         }
                     }
                 )
+                HookLogger.logSuccess("registerGnssNmeaCallback(Executor, Listener)")
             } catch (e: NoSuchMethodError) {
-                HookUtils.log("$TAG: registerGnssNmeaCallback(Executor, Listener) 方法不存在")
+                HookLogger.logFailure("registerGnssNmeaCallback(Executor, Listener)", "方法不存在: ${e.message}")
             } catch (e: Exception) {
-                HookUtils.log("$TAG: registerGnssNmeaCallback(Executor, Listener) Hook 失败: ${e.message}")
+                HookLogger.logFailure("registerGnssNmeaCallback(Executor, Listener)", "Hook 失败", e)
             }
         }
 
@@ -246,7 +256,14 @@ class NmeaHooks : HookEntry.HookHandler {
                     }
                 }
             )
-        } catch (_: Exception) {}
+            HookLogger.logSuccess("unregisterGnssNmeaCallback")
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("unregisterGnssNmeaCallback", "类不存在: ${e.message}")
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("unregisterGnssNmeaCallback", "方法不存在: ${e.message}")
+        } catch (e: Exception) {
+            HookLogger.logFailure("unregisterGnssNmeaCallback", "未知错误", e)
+        }
     }
 
     /**
@@ -287,18 +304,23 @@ class NmeaHooks : HookEntry.HookHandler {
 
                             if (replacement != null) {
                                 param.args[1] = replacement.trimEnd('\r', '\n')
-                                HookUtils.logDebug("$TAG: onNmeaReceived 替换 $sentenceType")
+                                HookLogger.logDebug(TAG, "onNmeaReceived 替换 $sentenceType")
                             }
                         }
                     }
                 }
             )
 
-            HookUtils.log("$TAG: GnssNmeaListener.onNmeaReceived Hook 完成")
+            HookLogger.logSuccess("GnssNmeaListener.onNmeaReceived")
+
         } catch (e: ClassNotFoundException) {
-            HookUtils.log("$TAG: GnssNmeaListener 类不存在 (API < 24)")
+            HookLogger.logFailure("GnssNmeaListener.onNmeaReceived", "类不存在 (API < 24)")
+
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("GnssNmeaListener.onNmeaReceived", "方法不存在: ${e.message}")
+
         } catch (e: Exception) {
-            HookUtils.log("$TAG: onNmeaReceived Hook 失败: ${e.message}")
+            HookLogger.logFailure("GnssNmeaListener.onNmeaReceived", "未知错误", e)
         }
     }
 
@@ -314,7 +336,7 @@ class NmeaHooks : HookEntry.HookHandler {
                 invokeOnNmeaReceived(listener, timestamp, sentence.trimEnd('\r', '\n'))
             }
         } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: 发送 NMEA 数据失败: ${e.message}")
+            HookLogger.logDebug(TAG, "发送 NMEA 数据失败: ${e.message}")
         }
     }
 
@@ -330,7 +352,7 @@ class NmeaHooks : HookEntry.HookHandler {
                 String::class.java
             )
             method.invoke(listener, timestamp, nmea)
-        } catch (_: NoSuchMethodException) {
+        } catch (e: NoSuchMethodException) {
             try {
                 val method = listener.javaClass.getMethod(
                     "onNmeaReceived",
@@ -339,10 +361,10 @@ class NmeaHooks : HookEntry.HookHandler {
                 )
                 method.invoke(listener, timestamp, nmea)
             } catch (e: Exception) {
-                HookUtils.logDebug("$TAG: invokeOnNmeaReceived 失败: ${e.message}")
+                HookLogger.logDebug(TAG, "invokeOnNmeaReceived 失败: ${e.message}")
             }
         } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: invokeOnNmeaReceived 失败: ${e.message}")
+            HookLogger.logDebug(TAG, "invokeOnNmeaReceived 失败: ${e.message}")
         }
     }
 

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>选择位置</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; font-family: sans-serif; }
+#map { width: 100%; height: calc(100% - 120px); }
+#toolbar {
+    height: 120px; background: #fff; padding: 8px 12px;
+    display: flex; flex-direction: column; justify-content: space-between;
+    border-top: 1px solid #ddd;
+}
+#search-row { display: flex; gap: 8px; }
+#search-input {
+    flex: 1; padding: 8px 12px; border: 1px solid #ccc;
+    border-radius: 6px; font-size: 14px; outline: none;
+}
+#search-btn {
+    padding: 8px 16px; background: #6200EE; color: #fff;
+    border: none; border-radius: 6px; font-size: 14px;
+}
+#info-row { display: flex; justify-content: space-between; align-items: center; }
+#coord-display { font-size: 13px; color: #666; }
+#confirm-btn {
+    padding: 10px 24px; background: #4CAF50; color: #fff;
+    border: none; border-radius: 6px; font-size: 15px; font-weight: bold;
+}
+#confirm-btn:disabled { background: #ccc; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="toolbar">
+    <div id="search-row">
+        <input id="search-input" type="text" placeholder="搜索地名（如：北京天安门）" />
+        <button id="search-btn" onclick="doSearch()">搜索</button>
+    </div>
+    <div id="info-row">
+        <span id="coord-display">点击地图选择位置</span>
+        <button id="confirm-btn" disabled onclick="confirmSelection()">确认选择</button>
+    </div>
+</div>
+<script>
+var map = L.map('map').setView([39.9042, 116.4074], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap',
+    maxZoom: 19
+}).addTo(map);
+
+var marker = null;
+var selectedLat = null;
+var selectedLng = null;
+
+map.on('click', function(e) {
+    placeMarker(e.latlng.lat, e.latlng.lng);
+});
+
+function placeMarker(lat, lng) {
+    selectedLat = lat;
+    selectedLng = lng;
+    if (marker) {
+        marker.setLatLng([lat, lng]);
+    } else {
+        marker = L.marker([lat, lng], {draggable: true}).addTo(map);
+        marker.on('dragend', function(e) {
+            var pos = e.target.getLatLng();
+            selectedLat = pos.lat;
+            selectedLng = pos.lng;
+            updateDisplay();
+        });
+    }
+    updateDisplay();
+}
+
+function updateDisplay() {
+    document.getElementById('coord-display').textContent =
+        '纬度: ' + selectedLat.toFixed(6) + '  经度: ' + selectedLng.toFixed(6);
+    document.getElementById('confirm-btn').disabled = false;
+}
+
+function confirmSelection() {
+    if (selectedLat !== null && selectedLng !== null) {
+        if (typeof Android !== 'undefined') {
+            Android.onLocationSelected(selectedLat, selectedLng, '');
+        }
+    }
+}
+
+function doSearch() {
+    var query = document.getElementById('search-input').value.trim();
+    if (!query) return;
+    fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(query))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data && data.length > 0) {
+                var lat = parseFloat(data[0].lat);
+                var lng = parseFloat(data[0].lon);
+                map.setView([lat, lng], 16);
+                placeMarker(lat, lng);
+            } else {
+                alert('未找到该地点');
+            }
+        })
+        .catch(function() {
+            alert('搜索失败，请检查网络');
+        });
+}
+
+document.getElementById('search-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') doSearch();
+});
+
+// 从 Android 端接收初始坐标
+function setInitialPosition(lat, lng) {
+    map.setView([lat, lng], 16);
+    placeMarker(lat, lng);
+}
+</script>
+</body>
+</html>
