@@ -43,6 +43,15 @@ class GnssHooks : HookEntry.HookHandler {
         private const val GNSS_CONSTELLATION_GALILEO = 6
         private const val GNSS_CONSTELLATION_IRNSS = 7
 
+        private const val GPS_L1 = 1575.42f * 1_000_000f
+        private const val GPS_L5 = 1176.45f * 1_000_000f
+        private const val GLONASS_L1_BASE = 1602.0f * 1_000_000f
+        private const val GLONASS_L1_STEP = 0.5625f * 1_000_000f
+        private const val BEIDOU_B1I = 1561.098f * 1_000_000f
+        private const val BEIDOU_B1C = 1575.42f * 1_000_000f
+        private const val GALILEO_E1 = 1575.42f * 1_000_000f
+        private const val GALILEO_E5A = 1176.45f * 1_000_000f
+
         private const val FULL_BIAS_BASE_GPS_NANOS = (GPS_EPOCH_OFFSET_SECONDS * 1_000_000_000L)
         private const val FULL_BIAS_DRIFT_PER_DAY_NANOS = 5L
     }
@@ -53,14 +62,15 @@ class GnssHooks : HookEntry.HookHandler {
         val cn0: Float,
         val elevation: Float,
         val azimuth: Float,
-        val usedInFix: Boolean
+        val usedInFix: Boolean,
+        val carrierFrequencyHz: Float
     )
 
-    private val satellites: List<SatelliteInfo> by lazy { generateSatellites() }
+        private val satellites: List<SatelliteInfo> by lazy { generateSatellites() }
 
     private fun generateSatellites(): List<SatelliteInfo> {
         val result = mutableListOf<SatelliteInfo>()
-        val random = java.util.Random(42)
+        val random = java.util.Random(System.currentTimeMillis() xor android.os.Process.myPid().toLong())
         val usedCount = 12 + random.nextInt(5)
 
         val gpsCount = 7 + random.nextInt(4)
@@ -74,7 +84,8 @@ class GnssHooks : HookEntry.HookHandler {
                 val cn0 = (28f + random.nextFloat() * 18f)
                 val elevation = (10f + random.nextFloat() * 70f)
                 val azimuth = (random.nextFloat() * 360f)
-                result.add(SatelliteInfo(svid, constellation, cn0, elevation, azimuth, result.size < usedCount))
+                val carrierFrequencyHz = getCarrierFrequency(constellation, svid, random)
+                result.add(SatelliteInfo(svid, constellation, cn0, elevation, azimuth, result.size < usedCount, carrierFrequencyHz))
             }
         }
 
@@ -86,6 +97,25 @@ class GnssHooks : HookEntry.HookHandler {
         return result.shuffled(random)
     }
 
+    private fun getCarrierFrequency(constellation: Int, svid: Int, random: java.util.Random): Float {
+        return when (constellation) {
+            GNSS_CONSTELLATION_GPS -> {
+                if (random.nextBoolean()) GPS_L1 else GPS_L5
+            }
+            GNSS_CONSTELLATION_GLONASS -> {
+                val k = (svid - 1) % 14 - 7
+                GLONASS_L1_BASE + k * GLONASS_L1_STEP
+            }
+            GNSS_CONSTELLATION_BEIDOU -> {
+                if (random.nextBoolean()) BEIDOU_B1I else BEIDOU_B1C
+            }
+            GNSS_CONSTELLATION_GALILEO -> {
+                if (random.nextBoolean()) GALILEO_E1 else GALILEO_E5A
+            }
+            else -> GPS_L1
+        }
+    }
+
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (!ConfigManager.isEnabled()) return
 
@@ -93,6 +123,7 @@ class GnssHooks : HookEntry.HookHandler {
 
         hookGnssStatus(lpparam)
         hookGnssMeasurements(lpparam)
+        hookGnssMeasurement(lpparam)
         hookGnssNavigationMessage(lpparam)
 
         HookUtils.log("$TAG: GNSS Hook 注入完成")
@@ -169,6 +200,55 @@ class GnssHooks : HookEntry.HookHandler {
                 }
             )
 
+            XposedHelpers.findAndHookMethod(
+                gnssStatusClass, "hasCarrierFrequencyHz", Int::class.java,
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        return satellites[param.args[0] as Int].usedInFix
+                    }
+                }
+            )
+
+            XposedHelpers.findAndHookMethod(
+                gnssStatusClass, "getCarrierFrequencyHz", Int::class.java,
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        return satellites[param.args[0] as Int].carrierFrequencyHz
+                    }
+                }
+            )
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                XposedHelpers.findAndHookMethod(
+                    gnssStatusClass, "hasBasebandCn0DbHz", Int::class.java,
+                    object : XC_MethodReplacement() {
+                        override fun replaceHookedMethod(param: MethodHookParam): Any {
+                            return satellites[param.args[0] as Int].usedInFix
+                        }
+                    }
+                )
+
+                XposedHelpers.findAndHookMethod(
+                    gnssStatusClass, "getBasebandCn0DbHz", Int::class.java,
+                    object : XC_MethodReplacement() {
+                        override fun replaceHookedMethod(param: MethodHookParam): Any {
+                            val baseCn0 = satellites[param.args[0] as Int].cn0
+                            val loss = 3f + java.util.concurrent.ThreadLocalRandom.current().nextFloat() * 3f
+                            return baseCn0 - loss
+                        }
+                    }
+                )
+            }
+
+            XposedHelpers.findAndHookMethod(
+                gnssStatusClass, "getUsedInFixCount",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        return satellites.count { it.usedInFix }
+                    }
+                }
+            )
+
             // 星历数据
             XposedHelpers.findAndHookMethod(
                 gnssStatusClass, "hasEphemerisData", Int::class.java,
@@ -224,30 +304,68 @@ class GnssHooks : HookEntry.HookHandler {
     }
 
     /**
+     * Hook GnssMeasurement - 返回伪造的 AGC 值
+     */
+    private fun hookGnssMeasurement(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val measurementClass = XposedHelpers.findClass(
+                "android.location.GnssMeasurement", lpparam.classLoader
+            )
+
+            XposedHelpers.findAndHookMethod(
+                measurementClass, "getAutomaticGainControlLevelDb",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        return 25f + java.util.concurrent.ThreadLocalRandom.current().nextFloat() * 20f
+                    }
+                }
+            )
+
+            HookUtils.log("$TAG: GnssMeasurement Hook 完成")
+        } catch (e: Exception) {
+            HookUtils.log("$TAG: GnssMeasurement Hook 失败: ${e.message}")
+        }
+    }
+
+    /**
      * 创建伪造的 GnssMeasurement 对象
      */
     private fun createFakeGnssMeasurement(sat: SatelliteInfo, index: Int): GnssMeasurement {
-        val measurement = XposedHelpers.newInstance(GnssMeasurement::class.java) as GnssMeasurement
-
-        XposedHelpers.setIntField(measurement, "mSvid", sat.svid)
-        XposedHelpers.setIntField(measurement, "mConstellationType", sat.constellationType)
-
         val cn0 = sat.cn0 + (java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 4f - 2f).toFloat()
-        XposedHelpers.setFloatField(measurement, "mCn0DbHz", cn0)
-
-        XposedHelpers.setDoubleField(measurement, "mTimeOffsetNanos", 0.0)
-
         val pseudorangeRate = java.util.Random(index.toLong() + 1000).nextGaussian() * 200.0
-        XposedHelpers.setDoubleField(measurement, "mPseudorangeRateMetersPerSecond", pseudorangeRate)
-
         val gpsTimeNanos = (System.currentTimeMillis() / 1000 - GPS_EPOCH_OFFSET_SECONDS) * 1_000_000_000L
         val receivedSvTime = gpsTimeNanos + (index * 100_000L)
+        val agc = 25f + java.util.concurrent.ThreadLocalRandom.current().nextFloat() * 20f
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                val builderClass = XposedHelpers.findClass("android.location.GnssMeasurement\$Builder", null)
+                val builder = builderClass.getConstructor().newInstance()
+                XposedHelpers.callMethod(builder, "setSvid", sat.svid)
+                XposedHelpers.callMethod(builder, "setConstellationType", sat.constellationType)
+                XposedHelpers.callMethod(builder, "setCn0DbHz", cn0)
+                XposedHelpers.callMethod(builder, "setTimeOffsetNanos", 0.0)
+                XposedHelpers.callMethod(builder, "setPseudorangeRateMetersPerSecond", pseudorangeRate)
+                XposedHelpers.callMethod(builder, "setReceivedSvTimeNanos", receivedSvTime)
+                XposedHelpers.callMethod(builder, "setState", FULL_STATE)
+                XposedHelpers.callMethod(builder, "setMultipathIndicator", 0)
+                XposedHelpers.callMethod(builder, "setCarrierFrequencyHz", sat.carrierFrequencyHz)
+                XposedHelpers.callMethod(builder, "setAutomaticGainControlLevelDb", agc)
+                return XposedHelpers.callMethod(builder, "build") as GnssMeasurement
+            } catch (_: Exception) {}
+        }
+
+        val measurement = XposedHelpers.newInstance(GnssMeasurement::class.java) as GnssMeasurement
+        XposedHelpers.setIntField(measurement, "mSvid", sat.svid)
+        XposedHelpers.setIntField(measurement, "mConstellationType", sat.constellationType)
+        XposedHelpers.setFloatField(measurement, "mCn0DbHz", cn0)
+        XposedHelpers.setDoubleField(measurement, "mTimeOffsetNanos", 0.0)
+        XposedHelpers.setDoubleField(measurement, "mPseudorangeRateMetersPerSecond", pseudorangeRate)
         XposedHelpers.setLongField(measurement, "mReceivedSvTimeNanos", receivedSvTime)
-
         XposedHelpers.setIntField(measurement, "mState", FULL_STATE)
-
         XposedHelpers.setIntField(measurement, "mMultipathIndicator", 0)
-
+        XposedHelpers.setFloatField(measurement, "mCarrierFrequencyHz", sat.carrierFrequencyHz)
+        XposedHelpers.setFloatField(measurement, "mAutomaticGainControlLevelDb", agc)
         return measurement
     }
 
@@ -320,6 +438,20 @@ class GnssHooks : HookEntry.HookHandler {
                 }
             )
 
+            XposedHelpers.findAndHookMethod(
+                clockClass, "hasLeapSecond",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = true
+                }
+            )
+
+            XposedHelpers.findAndHookMethod(
+                clockClass, "getLeapSecond",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = 18
+                }
+            )
+
             HookUtils.log("$TAG: GnssClock Hook 完成")
         } catch (e: Exception) {
             HookUtils.log("$TAG: GnssClock Hook 失败: ${e.message}")
@@ -350,21 +482,31 @@ class GnssHooks : HookEntry.HookHandler {
                         it is java.util.concurrent.Executor
                     } as? java.util.concurrent.Executor
 
-                    val fakeMessage = createFakeGnssNavigationMessage()
-
-                    val runnable = Runnable {
+                    val deliver = {
                         try {
+                            val fakeMessage = createFakeGnssNavigationMessage()
                             callback.onGnssNavigationMessageReceived(fakeMessage)
                         } catch (e: Exception) {
                             HookUtils.log("$TAG: 发送伪造导航消息失败: ${e.message}")
                         }
                     }
 
-                    when {
-                        handler != null -> handler.post(runnable)
-                        executor != null -> executor.execute(runnable)
-                        else -> android.os.Handler(android.os.Looper.getMainLooper()).post(runnable)
+                    val postRunnable: (Runnable) -> Unit = { runnable ->
+                        when {
+                            handler != null -> handler.post(runnable)
+                            executor != null -> executor.execute(runnable)
+                            else -> android.os.Handler(android.os.Looper.getMainLooper()).post(runnable)
+                        }
                     }
+
+                    postRunnable(Runnable { deliver() })
+
+                    val scheduledExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+                        Thread(r, "GnssNavMsg-Scheduler").apply { isDaemon = true }
+                    }
+                    scheduledExecutor.scheduleAtFixedRate({
+                        try { deliver() } catch (_: Exception) {}
+                    }, 1000, 1000, java.util.concurrent.TimeUnit.MILLISECONDS)
                 }
             }
 

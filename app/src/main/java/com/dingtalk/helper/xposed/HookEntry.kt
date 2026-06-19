@@ -46,14 +46,19 @@ class HookEntry : IXposedHookLoadPackage, IXposedHookZygoteInit {
             // 第二层：ROM 兼容性
             RomCompatibilityHooks(),
 
-            // 第三层：定位数据伪造
+            // 第三层：钉钉兼容性
+            DingTalkCompatHooks(),
+
+            // 第四层：定位数据伪造
             LocationHooks(),
+            FusedLocationHooks(),
             GnssHooks(),
+            NmeaHooks(),
             WifiHooks(),
             CellHooks(),
             SensorHooks(),
 
-            // 第四层：风控数据拦截（最后加载）
+            // 第五层：风控数据拦截（最后加载）
             RiskControlHooks()
         )
     }
