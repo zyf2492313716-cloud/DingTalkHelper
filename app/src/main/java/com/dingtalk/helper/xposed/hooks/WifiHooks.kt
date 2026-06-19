@@ -91,8 +91,8 @@ class WifiHooks : HookEntry.HookHandler {
                 "getSSID",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        val ssid = ConfigManager.getWifiSSID()
-                        return if (ssid.isNotEmpty()) "\"$ssid\"" else
+                        val correlated = ConfigManager.getCorrelatedWifiInfo()
+                        return if (correlated.ssid.isNotEmpty()) "\"${correlated.ssid}\"" else
                             XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args)
                     }
                 }
@@ -104,8 +104,8 @@ class WifiHooks : HookEntry.HookHandler {
                 "getBSSID",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        val bssid = ConfigManager.getWifiBSSID()
-                        return if (bssid.isNotEmpty()) bssid else
+                        val correlated = ConfigManager.getCorrelatedWifiInfo()
+                        return if (correlated.bssid.isNotEmpty()) correlated.bssid else
                             XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args)
                     }
                 }
@@ -164,20 +164,19 @@ class WifiHooks : HookEntry.HookHandler {
      * 通过反射修改 WifiInfo 的字段
      */
     private fun modifyWifiInfo(wifiInfo: WifiInfo) {
-        val fakeSSID = ConfigManager.getWifiSSID()
-        val fakeBSSID = ConfigManager.getWifiBSSID()
+        val correlated = ConfigManager.getCorrelatedWifiInfo()
 
         try {
-            if (fakeSSID.isNotEmpty()) {
+            if (correlated.ssid.isNotEmpty()) {
                 val ssidField = WifiInfo::class.java.getDeclaredField("mSSID")
                 ssidField.isAccessible = true
-                ssidField.set(wifiInfo, "\"$fakeSSID\"")
+                ssidField.set(wifiInfo, "\"${correlated.ssid}\"")
             }
 
-            if (fakeBSSID.isNotEmpty()) {
+            if (correlated.bssid.isNotEmpty()) {
                 val bssidField = WifiInfo::class.java.getDeclaredField("mBSSID")
                 bssidField.isAccessible = true
-                bssidField.set(wifiInfo, fakeBSSID)
+                bssidField.set(wifiInfo, correlated.bssid)
             }
 
             // 隐藏 MAC 地址随机化标记
@@ -200,19 +199,18 @@ class WifiHooks : HookEntry.HookHandler {
      */
     private fun createFakeScanResults(original: List<ScanResult>?): List<ScanResult> {
         val results = original?.toMutableList() ?: mutableListOf()
-        val fakeSSID = ConfigManager.getWifiSSID()
-        val fakeBSSID = ConfigManager.getWifiBSSID()
+        val correlated = ConfigManager.getCorrelatedWifiInfo()
 
-        if (fakeSSID.isEmpty()) return results
+        if (correlated.ssid.isEmpty()) return results
 
         // 检查是否已存在目标 WiFi
-        val exists = results.any { it.SSID == fakeSSID || (fakeBSSID.isNotEmpty() && it.BSSID == fakeBSSID) }
+        val exists = results.any { it.SSID == correlated.ssid || (correlated.bssid.isNotEmpty() && it.BSSID == correlated.bssid) }
 
         if (!exists) {
             // 添加伪造的 WiFi 扫描结果
             val fakeScanResult = ScanResult().apply {
-                SSID = fakeSSID
-                BSSID = fakeBSSID
+                SSID = correlated.ssid
+                BSSID = correlated.bssid
                 level = -50 // 信号强度
                 frequency = 2437 // 2.4GHz Channel 6
                 capabilities = "[WPA2-PSK-CCMP][ESS]"

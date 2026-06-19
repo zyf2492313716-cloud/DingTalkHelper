@@ -4,6 +4,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEventListener
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
+import com.dingtalk.helper.xposed.data.FakeDataProvider
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
@@ -163,29 +164,19 @@ class SensorHooks : HookEntry.HookHandler {
     }
 
     private fun isMoving(): Boolean {
-        return try {
-            LocationHooks.getCurrentFakeLocation().speed > 0.5f
-        } catch (_: Exception) { false }
+        return FakeDataProvider.isMoving()
     }
 
     private fun getSpeed(): Float {
-        return try {
-            LocationHooks.getCurrentFakeLocation().speed
-        } catch (_: Exception) {
-            0f
-        }
+        return FakeDataProvider.getSpeed()
     }
 
     private fun getBearing(): Float {
-        return try {
-            LocationHooks.getCurrentFakeLocation().bearing
-        } catch (_: Exception) {
-            0f
-        }
+        return FakeDataProvider.getBearing()
     }
 
     private fun modifyAccelerometer(values: FloatArray, timestamp: Long): FloatArray {
-        val t = (timestamp % 1_000_000_000) / 1_000_000_000.0f + (timestamp / 1_000_000_000).toFloat()
+        val t = timestampToSeconds(timestamp).toFloat()
         val result = FloatArray(3)
 
         if (isMoving()) {
@@ -209,7 +200,7 @@ class SensorHooks : HookEntry.HookHandler {
     }
 
     private fun modifyGyroscope(values: FloatArray, timestamp: Long): FloatArray {
-        val t = (timestamp % 1_000_000_000) / 1_000_000_000.0f + (timestamp / 1_000_000_000).toFloat()
+        val t = timestampToSeconds(timestamp).toFloat()
         val result = FloatArray(3)
 
         if (isMoving()) {
@@ -235,26 +226,61 @@ class SensorHooks : HookEntry.HookHandler {
         val bearingRad = Math.toRadians(bearing.toDouble()).toFloat()
 
         val declination = getMagneticDeclination()
+        val horizontalMag = getHorizontalMagComponent()
+        val verticalMag = getVerticalMagComponent()
 
         val noiseScale = if (isMoving()) MAG_STATIC_NOISE * 2f else MAG_STATIC_NOISE
 
         val result = FloatArray(3)
-        val horizontalMag = 30.0f
         result[0] = horizontalMag * cos(bearingRad) + gaussianNoise(noiseScale)
         result[1] = -horizontalMag * sin(bearingRad) * cos(declination) +
-                MAG_DOWN_BASE * sin(declination) + gaussianNoise(noiseScale)
+                verticalMag * sin(declination) + gaussianNoise(noiseScale)
         result[2] = horizontalMag * sin(bearingRad) * sin(declination) +
-                MAG_DOWN_BASE * cos(declination) + gaussianNoise(noiseScale)
+                verticalMag * cos(declination) + gaussianNoise(noiseScale)
 
         return result
     }
 
+    /**
+     * 磁偏角（度）= -0.15 * 经度（适用于中国地区，误差约 1-2 度）
+     * 结果限制在 [-20, +20] 度范围内
+     * 注意：返回值为弧度制，供三角函数使用
+     */
     private fun getMagneticDeclination(): Float {
         return try {
             val lon = ConfigManager.getLongitude()
-            Math.toRadians(-0.15 * lon).toFloat()
+            val declinationDeg = (-0.15 * lon).coerceIn(-20.0, 20.0)
+            Math.toRadians(declinationDeg).toFloat()
         } catch (_: Exception) {
             0.1f
+        }
+    }
+
+    /**
+     * 基于纬度计算水平磁场分量 H
+     * H ≈ 25 + 15 * cos(2*lat)（中国地区近似）
+     */
+    private fun getHorizontalMagComponent(): Float {
+        return try {
+            val lat = ConfigManager.getLatitude()
+            val latRad = Math.toRadians(lat)
+            (25.0 + 15.0 * cos(2.0 * latRad)).toFloat()
+        } catch (_: Exception) {
+            30.0f
+        }
+    }
+
+    /**
+     * 基于纬度计算垂直磁场分量 Z
+     * Z ≈ -45 * sin(lat)（中国地区近似）
+     */
+    private fun getVerticalMagComponent(): Float {
+        return try {
+            val lat = ConfigManager.getLatitude()
+            val latRad = Math.toRadians(lat)
+            (-45.0 * sin(latRad)).toFloat()
+        } catch (_: Exception) {
+            MAG_DOWN_BASE
         }
     }
 
@@ -262,11 +288,15 @@ class SensorHooks : HookEntry.HookHandler {
         return (ThreadLocalRandom.current().nextGaussian() * amplitude).toFloat()
     }
 
+    private fun timestampToSeconds(timestamp: Long): Double {
+        return timestamp / 1_000_000_000.0
+    }
+
     private fun modifyGravity(values: FloatArray, timestamp: Long): FloatArray {
         val result = FloatArray(3)
 
         if (isMoving()) {
-            val t = (timestamp % 1_000_000_000) / 1_000_000_000.0f + (timestamp / 1_000_000_000).toFloat()
+            val t = timestampToSeconds(timestamp).toFloat()
             val walkPhase = (t * WALK_FREQ_HZ * TWO_PI).toDouble()
             val speedFactor = (getSpeed() / 3.0f).coerceIn(0.5f, 2.0f)
 
@@ -287,7 +317,7 @@ class SensorHooks : HookEntry.HookHandler {
         val result = FloatArray(3)
 
         if (isMoving()) {
-            val t = (timestamp % 1_000_000_000) / 1_000_000_000.0f + (timestamp / 1_000_000_000).toFloat()
+            val t = timestampToSeconds(timestamp).toFloat()
             val walkPhase = (t * WALK_FREQ_HZ * TWO_PI).toDouble()
             val speedFactor = (getSpeed() / 3.0f).coerceIn(0.5f, 2.0f)
 

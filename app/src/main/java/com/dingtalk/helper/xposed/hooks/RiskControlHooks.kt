@@ -5,10 +5,12 @@ import com.dingtalk.helper.xposed.HookEntry
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
-import java.lang.reflect.Method
+import java.util.LinkedHashMap
+import java.util.TreeMap
+import kotlin.math.roundToInt
+import kotlin.random.Random
 
 class RiskControlHooks : HookEntry.HookHandler {
 
@@ -44,6 +46,41 @@ class RiskControlHooks : HookEntry.HookHandler {
             "memoryHook", "codeInjection", "ptrace",
             "riskScore", "riskLevel", "deviceRisk", "envRisk"
         )
+
+        private val SENSITIVE_PATHS = listOf(
+            "/proc/self/maps", "/proc/self/status", "/proc/self/cmdline",
+            "/proc/self/fd", "/proc/self/exe", "/proc/maps",
+            "/proc/cpuinfo", "/proc/version", "/proc/net/tcp",
+            "/system/build.prop", "/sys/class/net", "/sys/devices"
+        )
+
+        fun generateDeterministicMac(): String {
+            val seed = EmulatorHooks.getDeviceModel().hashCode().toLong() xor 0x4D414330L
+            val rng = java.util.Random(seed)
+            return String.format(
+                "%02X:%02X:%02X:%02X:%02X:%02X",
+                (rng.nextInt(254) + 1) and 0xFE,
+                rng.nextInt(256), rng.nextInt(256),
+                rng.nextInt(256), rng.nextInt(256), rng.nextInt(256)
+            )
+        }
+
+        private fun sampleRiskScore(): Int {
+            val mean = 3.0
+            val stddev = 2.0
+            var score = java.util.concurrent.ThreadLocalRandom.current().nextGaussian() * stddev + mean
+            score = score.coerceIn(0.0, 10.0)
+            return score.roundToInt()
+        }
+
+        private fun sampleRiskLevel(): String {
+            val roll = Random.nextDouble()
+            return when {
+                roll < 0.80 -> "low"
+                roll < 0.95 -> "normal"
+                else -> "medium"
+            }
+        }
     }
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -85,6 +122,25 @@ class RiskControlHooks : HookEntry.HookHandler {
         }
 
         try {
+            XposedHelpers.findAndHookMethod(
+                System::class.java, "load",
+                String::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val path = (param.args[0] as? String)?.lowercase() ?: return
+                        if (BLOCKED_NATIVE_LIBS.any { path.contains(it) }) {
+                            HookUtils.log("$TAG: 阻止 System.load 加载风控库: ${param.args[0]}")
+                            param.args[0] = "/system/lib/nonexistent_blocked_${System.currentTimeMillis()}.so"
+                        }
+                    }
+                }
+            )
+            HookUtils.logDebug("$TAG: System.load Hook 完成")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: System.load Hook 失败: ${e.message}")
+        }
+
+        try {
             val runtimeClass = Runtime::class.java
             XposedHelpers.findAndHookMethod(
                 runtimeClass, "loadLibrary",
@@ -93,7 +149,7 @@ class RiskControlHooks : HookEntry.HookHandler {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val libName = (param.args[1] as? String)?.lowercase() ?: return
                         if (BLOCKED_NATIVE_LIBS.any { libName.contains(it) }) {
-                            HookUtils.log("$TAG: 阻止 Runtime 加载风控 native 库: ${param.args[1]}")
+                            HookUtils.log("$TAG: 阻止 Runtime.loadLibrary 加载风控库: ${param.args[1]}")
                             param.args[1] = "nonexistent_blocked_lib_${System.currentTimeMillis()}"
                         }
                     }
@@ -102,6 +158,123 @@ class RiskControlHooks : HookEntry.HookHandler {
         } catch (e: Exception) {
             HookUtils.logDebug("$TAG: Runtime.loadLibrary Hook 失败: ${e.message}")
         }
+
+        try {
+            val runtimeClass = Runtime::class.java
+            XposedHelpers.findAndHookMethod(
+                runtimeClass, "load",
+                String::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val path = (param.args[0] as? String)?.lowercase() ?: return
+                        if (BLOCKED_NATIVE_LIBS.any { path.contains(it) }) {
+                            HookUtils.log("$TAG: 阻止 Runtime.load 加载风控库: ${param.args[0]}")
+                            param.args[0] = "/system/lib/nonexistent_blocked_${System.currentTimeMillis()}.so"
+                        }
+                    }
+                }
+            )
+            HookUtils.logDebug("$TAG: Runtime.load Hook 完成")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: Runtime.load Hook 失败: ${e.message}")
+        }
+
+        hookRuntimeExec(lpparam)
+    }
+
+    private fun hookRuntimeExec(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val runtimeClass = Runtime::class.java
+
+        // Hook Runtime.exec(String)
+        try {
+            XposedHelpers.findAndHookMethod(
+                runtimeClass, "exec",
+                String::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val cmd = (param.args[0] as? String) ?: return
+                        if (isSensitiveExec(cmd)) {
+                            HookUtils.log("$TAG: 阻止敏感 exec: ${cmd.take(120)}")
+                            param.args[0] = "echo blocked"
+                        }
+                    }
+                }
+            )
+        } catch (_: Exception) {}
+
+        // Hook Runtime.exec(String[])
+        try {
+            XposedHelpers.findAndHookMethod(
+                runtimeClass, "exec",
+                Array<String>::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        @Suppress("UNCHECKED_CAST")
+                        val cmdArray = param.args[0] as? Array<String> ?: return
+                        val cmdStr = cmdArray.joinToString(" ")
+                        if (isSensitiveExec(cmdStr)) {
+                            HookUtils.log("$TAG: 阻止敏感 exec 数组: ${cmdStr.take(120)}")
+                            param.args[0] = arrayOf("echo", "blocked")
+                        }
+                    }
+                }
+            )
+        } catch (_: Exception) {}
+
+        // Hook Runtime.exec(String, String[])
+        try {
+            XposedHelpers.findAndHookMethod(
+                runtimeClass, "exec",
+                String::class.java, Array<String>::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val cmd = (param.args[0] as? String) ?: return
+                        if (isSensitiveExec(cmd)) {
+                            HookUtils.log("$TAG: 阻止敏感 exec(env): ${cmd.take(120)}")
+                            param.args[0] = "echo blocked"
+                        }
+                    }
+                }
+            )
+        } catch (_: Exception) {}
+
+        // Hook ProcessBuilder 构造 + start
+        try {
+            val pbClass = ProcessBuilder::class.java
+            XposedHelpers.findAndHookMethod(
+                pbClass, "start",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        try {
+                            val cmdList = XposedHelpers.getObjectField(param.thisObject, "command") as? List<*>
+                            val cmdStr = cmdList?.joinToString(" ") ?: return
+                            if (isSensitiveExec(cmdStr)) {
+                                HookUtils.log("$TAG: 阻止敏感 ProcessBuilder: ${cmdStr.take(120)}")
+                                XposedHelpers.setObjectField(param.thisObject, "command", listOf("echo", "blocked"))
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+        } catch (_: Exception) {}
+
+        HookUtils.logDebug("$TAG: Runtime.exec/ProcessBuilder Hook 完成")
+    }
+
+    private fun isSensitiveExec(cmd: String): Boolean {
+        val lower = cmd.lowercase()
+        return SENSITIVE_PATHS.any { lower.contains(it.lowercase()) } ||
+                lower.contains("cat /proc") ||
+                lower.contains("getprop") ||
+                lower.contains("which su") ||
+                lower.contains("busybox") ||
+                lower.contains("magisk") ||
+                lower.contains("xposed") ||
+                lower.contains("frida") ||
+                lower.contains("pm list packages") ||
+                lower.contains("dumpsys") ||
+                lower.contains("ps -") ||
+                lower.contains("top -")
     }
 
     // ==================== 数据收集阶段拦截 ====================
@@ -150,7 +323,6 @@ class RiskControlHooks : HookEntry.HookHandler {
     private fun hookDeviceInfoCollectors(lpparam: XC_LoadPackage.LoadPackageParam) {
         val classLoader = lpparam.classLoader
         hookDeviceIdentifierMethods(classLoader)
-        hookBuildProperties(classLoader)
         hookEnvironmentCollection(classLoader)
         hookLocationCollection(classLoader)
         hookContextGetMethods(classLoader)
@@ -191,44 +363,10 @@ class RiskControlHooks : HookEntry.HookHandler {
                 wifiInfoClass, "getMacAddress",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        param.result = "02:00:00:00:00:00"
+                        param.result = generateDeterministicMac().lowercase()
                     }
                 }
             )
-        } catch (_: Exception) {}
-    }
-
-    private fun hookBuildProperties(classLoader: ClassLoader) {
-        try {
-            val buildClass = XposedHelpers.findClass("android.os.Build", classLoader)
-
-            val stringFields = mapOf(
-                "FINGERPRINT" to EmulatorHooks.getDeviceFingerprint(),
-                "DISPLAY" to EmulatorHooks.getDeviceDisplay(),
-                "HOST" to "SRPXG000000",
-                "TAGS" to "release-keys",
-                "TYPE" to "user",
-                "USER" to "dpi",
-                "MODEL" to EmulatorHooks.getDeviceModel(),
-                "MANUFACTURER" to EmulatorHooks.getDeviceManufacturer(),
-                "BRAND" to EmulatorHooks.getDeviceBrand(),
-                "PRODUCT" to EmulatorHooks.getDeviceProduct(),
-                "DEVICE" to EmulatorHooks.getDeviceDevice(),
-                "BOARD" to EmulatorHooks.getDeviceBoard(),
-                "HARDWARE" to EmulatorHooks.getDeviceHardware()
-            )
-
-            for ((field, value) in stringFields) {
-                try {
-                    XposedHelpers.setStaticObjectField(buildClass, field, value)
-                } catch (_: Exception) {}
-            }
-        } catch (_: Exception) {}
-
-        try {
-            val buildVersionClass = XposedHelpers.findClass("android.os.Build\$VERSION", classLoader)
-            XposedHelpers.setStaticObjectField(buildVersionClass, "RELEASE", EmulatorHooks.getDeviceRelease())
-            XposedHelpers.setStaticObjectField(buildVersionClass, "INCREMENTAL", EmulatorHooks.getDeviceIncremental())
         } catch (_: Exception) {}
     }
 
@@ -405,6 +543,7 @@ class RiskControlHooks : HookEntry.HookHandler {
 
     private fun hookEncryptFunctions(lpparam: XC_LoadPackage.LoadPackageParam) {
         val classLoader = lpparam.classLoader
+        // 阿里内部加密类
         for (className in listOf(
             "com.alibaba.wireless.security.securitybody.encrypt.EncryptManager",
             "com.alibaba.security.encrypt.EncryptUtils",
@@ -424,8 +563,22 @@ class RiskControlHooks : HookEntry.HookHandler {
                                         param.args[0] = tamperSecurityData(input)
                                         HookUtils.logDebug("$TAG: 篡改加密输入: $className.$methodName")
                                     }
-                                    if (Constants.DEBUG_MODE) {
-                                        HookUtils.logDebug("$TAG: 加密函数调用: $className.$methodName, input=${input.take(200)}")
+                                }
+                            }
+                        )
+                    } catch (_: NoSuchMethodError) {}
+
+                    // 支持 byte[] 参数的加密方法
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            clazz, methodName, ByteArray::class.java,
+                            object : XC_MethodHook() {
+                                override fun beforeHookedMethod(param: MethodHookParam) {
+                                    val input = param.args[0] as? ByteArray ?: return
+                                    val str = try { String(input) } catch (_: Exception) { return }
+                                    if (isSecurityData(str)) {
+                                        param.args[0] = tamperSecurityData(str).toByteArray()
+                                        HookUtils.logDebug("$TAG: 篡改加密 byte[] 输入: $className.$methodName")
                                     }
                                 }
                             }
@@ -435,6 +588,166 @@ class RiskControlHooks : HookEntry.HookHandler {
             } catch (_: ClassNotFoundException) {
                 continue
             }
+        }
+
+        // Hook javax.crypto.Cipher.doFinal
+        try {
+            val cipherClass = javax.crypto.Cipher::class.java
+            // doFinal(byte[])
+            XposedHelpers.findAndHookMethod(
+                cipherClass, "doFinal", ByteArray::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val input = param.args[0] as? ByteArray ?: return
+                        val str = try { String(input) } catch (_: Exception) { return }
+                        if (isSecurityData(str)) {
+                            param.args[0] = tamperSecurityData(str).toByteArray()
+                            HookUtils.logDebug("$TAG: 篡改 Cipher.doFinal byte[]")
+                        }
+                    }
+                }
+            )
+            // doFinal(byte[], int, int)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    cipherClass, "doFinal",
+                    ByteArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val input = param.args[0] as? ByteArray ?: return
+                            val str = try { String(input) } catch (_: Exception) { return }
+                            if (isSecurityData(str)) {
+                                val tampered = tamperSecurityData(str).toByteArray()
+                                param.args[0] = tampered
+                                param.args[2] = tampered.size
+                                HookUtils.logDebug("$TAG: 篡改 Cipher.doFinal byte[],off,len")
+                            }
+                        }
+                    }
+                )
+            } catch (_: Exception) {}
+            // update(byte[])
+            XposedHelpers.findAndHookMethod(
+                cipherClass, "update", ByteArray::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val input = param.args[0] as? ByteArray ?: return
+                        val str = try { String(input) } catch (_: Exception) { return }
+                        if (isSecurityData(str)) {
+                            param.args[0] = tamperSecurityData(str).toByteArray()
+                            HookUtils.logDebug("$TAG: 篡改 Cipher.update byte[]")
+                        }
+                    }
+                }
+            )
+            HookUtils.logDebug("$TAG: javax.crypto.Cipher Hook 完成")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: Cipher Hook 失败: ${e.message}")
+        }
+
+        // Hook java.security.MessageDigest.digest
+        try {
+            val mdClass = java.security.MessageDigest::class.java
+            XposedHelpers.findAndHookMethod(
+                mdClass, "digest", ByteArray::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val input = param.args[0] as? ByteArray ?: return
+                        val str = try { String(input) } catch (_: Exception) { return }
+                        if (isSecurityData(str)) {
+                            param.args[0] = tamperSecurityData(str).toByteArray()
+                            HookUtils.logDebug("$TAG: 篡改 MessageDigest.digest byte[]")
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                mdClass, "update", ByteArray::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val input = param.args[0] as? ByteArray ?: return
+                        val str = try { String(input) } catch (_: Exception) { return }
+                        if (isSecurityData(str)) {
+                            param.args[0] = tamperSecurityData(str).toByteArray()
+                            HookUtils.logDebug("$TAG: 篡改 MessageDigest.update byte[]")
+                        }
+                    }
+                }
+            )
+            // update(byte[], int, int)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    mdClass, "update",
+                    ByteArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val input = param.args[0] as? ByteArray ?: return
+                            val str = try { String(input) } catch (_: Exception) { return }
+                            if (isSecurityData(str)) {
+                                val tampered = tamperSecurityData(str).toByteArray()
+                                param.args[0] = tampered
+                                param.args[2] = tampered.size
+                                HookUtils.logDebug("$TAG: 篡改 MessageDigest.update byte[],off,len")
+                            }
+                        }
+                    }
+                )
+            } catch (_: Exception) {}
+            HookUtils.logDebug("$TAG: MessageDigest Hook 完成")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: MessageDigest Hook 失败: ${e.message}")
+        }
+
+        // Hook javax.crypto.Mac.doFinal / update
+        try {
+            val macClass = javax.crypto.Mac::class.java
+            XposedHelpers.findAndHookMethod(
+                macClass, "doFinal", ByteArray::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val input = param.args[0] as? ByteArray ?: return
+                        val str = try { String(input) } catch (_: Exception) { return }
+                        if (isSecurityData(str)) {
+                            param.args[0] = tamperSecurityData(str).toByteArray()
+                            HookUtils.logDebug("$TAG: 篡改 Mac.doFinal byte[]")
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                macClass, "update", ByteArray::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val input = param.args[0] as? ByteArray ?: return
+                        val str = try { String(input) } catch (_: Exception) { return }
+                        if (isSecurityData(str)) {
+                            param.args[0] = tamperSecurityData(str).toByteArray()
+                            HookUtils.logDebug("$TAG: 篡改 Mac.update byte[]")
+                        }
+                    }
+                }
+            )
+            try {
+                XposedHelpers.findAndHookMethod(
+                    macClass, "update",
+                    ByteArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val input = param.args[0] as? ByteArray ?: return
+                            val str = try { String(input) } catch (_: Exception) { return }
+                            if (isSecurityData(str)) {
+                                val tampered = tamperSecurityData(str).toByteArray()
+                                param.args[0] = tampered
+                                param.args[2] = tampered.size
+                                HookUtils.logDebug("$TAG: 篡改 Mac.update byte[],off,len")
+                            }
+                        }
+                    }
+                )
+            } catch (_: Exception) {}
+            HookUtils.logDebug("$TAG: javax.crypto.Mac Hook 完成")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: Mac Hook 失败: ${e.message}")
         }
     }
 
@@ -570,7 +883,11 @@ class RiskControlHooks : HookEntry.HookHandler {
                 tamperMapRecursive(map)
             }
             is Map<*, *> -> {
-                val mutableMap = HashMap<Any?, Any?>()
+                val mutableMap = when (result) {
+                    is LinkedHashMap<*, *> -> LinkedHashMap<Any?, Any?>(result.size)
+                    is java.util.SortedMap<*, *> -> TreeMap<Any?, Any?>((result as java.util.SortedMap<Any?, Any?>).comparator())
+                    else -> HashMap<Any?, Any?>(result.size)
+                }
                 result.forEach { (k, v) -> mutableMap[k] = v }
                 tamperMapRecursive(mutableMap as MutableMap<Any, Any>)
                 param.result = mutableMap
@@ -641,8 +958,8 @@ class RiskControlHooks : HookEntry.HookHandler {
         result = result.replace("\"multOpen\":true", "\"multOpen\":false")
         result = result.replace("\"dualApp\":true", "\"dualApp\":false")
         result = result.replace("\"tampered\":true", "\"tampered\":false")
-        result = result.replace(Regex("\"riskScore\":[0-9]+")) { "\"riskScore\":${(1..10).random()}" }
-        result = result.replace(Regex("\"riskLevel\":[0-9]+")) { "\"riskLevel\":\"${listOf("low", "normal").random()}\"" }
+        result = result.replace(Regex("\"riskScore\":[0-9]+")) { "\"riskScore\":${sampleRiskScore()}" }
+        result = result.replace(Regex("\"riskLevel\":\"?[a-zA-Z]+\"?")) { "\"riskLevel\":\"${sampleRiskLevel()}\"" }
         return result
     }
 
@@ -656,8 +973,8 @@ class RiskControlHooks : HookEntry.HookHandler {
 
             if (RISK_CONTROL_KEYS.contains(key)) {
                 when {
-                    key == "riskscore" -> entry.setValue((1..10).random())
-                    key == "risklevel" -> entry.setValue(listOf("low", "normal").random())
+                    key == "riskscore" -> entry.setValue(sampleRiskScore())
+                    key == "risklevel" -> entry.setValue(sampleRiskLevel())
                     value is Boolean -> entry.setValue(false)
                     value is Int -> entry.setValue(0)
                     value is Long -> entry.setValue(0L)
@@ -681,8 +998,13 @@ class RiskControlHooks : HookEntry.HookHandler {
                 }
                 is Map<*, *> -> {
                     try {
-                        val mutableValue = HashMap<Any?, Any?>()
-                        (value as Map<*, *>).forEach { (k, v) -> mutableValue[k] = v }
+                        val src = value as Map<*, *>
+                        val mutableValue = when (src) {
+                            is LinkedHashMap<*, *> -> LinkedHashMap<Any?, Any?>(src.size)
+                            is java.util.SortedMap<*, *> -> TreeMap<Any?, Any?>((src as java.util.SortedMap<Any?, Any?>).comparator())
+                            else -> HashMap<Any?, Any?>(src.size)
+                        }
+                        src.forEach { (k, v) -> mutableValue[k] = v }
                         tamperMapRecursive(mutableValue as MutableMap<Any, Any>)
                         entry.setValue(mutableValue)
                     } catch (_: Exception) {}
@@ -731,8 +1053,13 @@ class RiskControlHooks : HookEntry.HookHandler {
                 }
                 is Map<*, *> -> {
                     try {
-                        val mutableItem = HashMap<Any?, Any?>()
-                        (item as Map<*, *>).forEach { (k, v) -> mutableItem[k] = v }
+                        val src = item as Map<*, *>
+                        val mutableItem = when (src) {
+                            is LinkedHashMap<*, *> -> LinkedHashMap<Any?, Any?>(src.size)
+                            is java.util.SortedMap<*, *> -> TreeMap<Any?, Any?>((src as java.util.SortedMap<Any?, Any?>).comparator())
+                            else -> HashMap<Any?, Any?>(src.size)
+                        }
+                        src.forEach { (k, v) -> mutableItem[k] = v }
                         tamperMapRecursive(mutableItem as MutableMap<Any, Any>)
                         list[i] = mutableItem
                     } catch (_: Exception) {}
@@ -761,8 +1088,8 @@ class RiskControlHooks : HookEntry.HookHandler {
             "getimsi", "imsi" -> EmulatorHooks.getRandomIMSI()
             "getandroidid", "androidid" -> EmulatorHooks.getRandomAndroidID()
             "getserialnumber", "serial" -> EmulatorHooks.getRandomSerial()
-            "getmacaddress", "mac", "macaddress", "wifimac" -> "02:00:00:00:00:00"
-            "getbluetoothmac", "bluetoothmac" -> "02:00:00:00:00:00"
+            "getmacaddress", "mac", "macaddress", "wifimac" -> generateDeterministicMac().lowercase()
+            "getbluetoothmac", "bluetoothmac" -> generateDeterministicMac().lowercase()
             "getadvertisingid", "advertisingid" -> "00000000-0000-0000-0000-000000000000"
             "getoaid", "oaid" -> "00000000-0000-0000-0000-000000000000"
             "getua", "ua" -> "Mozilla/5.0 (Linux; Android ${EmulatorHooks.getDeviceRelease()}; ${EmulatorHooks.getDeviceModel()}) AppleWebKit/537.36"

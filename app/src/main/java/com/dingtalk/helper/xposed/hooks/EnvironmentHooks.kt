@@ -4,6 +4,7 @@ import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookUtils
+import com.dingtalk.helper.xposed.utils.StackTraceFilter
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedHelpers
@@ -23,10 +24,6 @@ class EnvironmentHooks : HookEntry.HookHandler {
 
         private val DANGEROUS_COMMANDS = setOf(
             "su", "which su", "whereis su", "magisk", "xposed"
-        )
-
-        private val XPOSED_KEYWORDS = setOf(
-            "xposed", "lsposed", "edxposed", "riru", "lsplant"
         )
 
         private val HIDDEN_SETTINGS = setOf(
@@ -169,9 +166,7 @@ class EnvironmentHooks : HookEntry.HookHandler {
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val stackTrace = param.result as? Array<StackTraceElement> ?: return
-                        param.result = stackTrace.filter { element ->
-                            !isXposedRelatedClass(element.className)
-                        }.toTypedArray()
+                        param.result = StackTraceFilter.filterStackTrace(stackTrace)
                     }
                 }
             )
@@ -237,6 +232,6 @@ class EnvironmentHooks : HookEntry.HookHandler {
     }
 
     private fun isXposedRelatedClass(className: String): Boolean {
-        return XPOSED_KEYWORDS.any { className.contains(it, ignoreCase = true) }
+        return StackTraceFilter.isXposedRelatedClass(className)
     }
 }

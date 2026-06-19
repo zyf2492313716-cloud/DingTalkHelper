@@ -26,21 +26,6 @@ class EmulatorHooks : HookEntry.HookHandler {
             "genymotion", "nox", "bluestacks", "ldplayer"
         )
 
-        // 模拟器文件特征
-        private val EMULATOR_FILES = listOf(
-            "/dev/qemu_pipe",
-            "/dev/qemud",
-            "/dev/socket/qemud",
-            "/dev/socket/genyd",
-            "/dev/socket/baseband_genyd",
-            "/sys/qemu_trace",
-            "/system/bin/qemu-props",
-            "/dev/avf_guest",
-            "/system/etc/init.goldfish.rc",
-            "/system/lib/libc_malloc_debug_qemu.so",
-            "/system/lib64/libc_malloc_debug_qemu.so"
-        )
-
         private data class DeviceConfig(
             val brand: String,
             val model: String,
@@ -408,8 +393,8 @@ class EmulatorHooks : HookEntry.HookHandler {
                             val file = param.thisObject as File
                             val path = file.absolutePath
 
-                            // 隐藏模拟器特征文件
-                            if (EMULATOR_FILES.any { path.contains(it) }) {
+                            // 只在检测到模拟器特征路径时才拦截，其他路径保持原样
+                            if (path in Constants.EMULATOR_FILES) {
                                 param.result = false
                                 return
                             }
@@ -604,14 +589,15 @@ class EmulatorHooks : HookEntry.HookHandler {
                 )
             } catch (_: Exception) {}
 
-            // 运营商信息
+            // 运营商信息（根据 GPS 坐标动态推断）
+            val operatorInfo = getOperatorInfoForLocation()
             val operatorOverrides = mapOf(
-                "getNetworkOperator" to "46000",
-                "getNetworkOperatorName" to "中国移动",
-                "getSimOperator" to "46000",
-                "getSimOperatorName" to "中国移动",
-                "getNetworkCountryIso" to "cn",
-                "getSimCountryIso" to "cn"
+                "getNetworkOperator" to operatorInfo.networkOperator,
+                "getNetworkOperatorName" to operatorInfo.networkOperatorName,
+                "getSimOperator" to operatorInfo.simOperator,
+                "getSimOperatorName" to operatorInfo.simOperatorName,
+                "getNetworkCountryIso" to operatorInfo.networkCountryIso,
+                "getSimCountryIso" to operatorInfo.simCountryIso
             )
             for ((method, value) in operatorOverrides) {
                 try {
@@ -800,4 +786,65 @@ class EmulatorHooks : HookEntry.HookHandler {
     }
 
     private fun generateAndroidId(): String = getRandomAndroidID()
+
+    /**
+     * 根据 GPS 坐标推断国家/地区，返回对应的运营商信息
+     * 中国：460/中国移动/中国联通/中国电信
+     * 美国：310/T-Mobile/AT&T/Verizon
+     * 其他地区：使用默认值（中国）
+     */
+    private data class OperatorInfo(
+        val networkOperator: String,
+        val networkOperatorName: String,
+        val simOperator: String,
+        val simOperatorName: String,
+        val networkCountryIso: String,
+        val simCountryIso: String
+    )
+
+    private fun getOperatorInfoForLocation(): OperatorInfo {
+        return try {
+            val lat = com.dingtalk.helper.utils.ConfigManager.getLatitude()
+            val lon = com.dingtalk.helper.utils.ConfigManager.getLongitude()
+
+            when {
+                // 中国地区：纬度 18-54，经度 73-135
+                lat in 18.0..54.0 && lon in 73.0..135.0 -> OperatorInfo(
+                    networkOperator = "46000",
+                    networkOperatorName = "中国移动",
+                    simOperator = "46000",
+                    simOperatorName = "中国移动",
+                    networkCountryIso = "cn",
+                    simCountryIso = "cn"
+                )
+                // 美国地区：纬度 24-49，经度 -125..-66
+                lat in 24.0..49.0 && lon in -125.0..-66.0 -> OperatorInfo(
+                    networkOperator = "310260",
+                    networkOperatorName = "T-Mobile",
+                    simOperator = "310260",
+                    simOperatorName = "T-Mobile",
+                    networkCountryIso = "us",
+                    simCountryIso = "us"
+                )
+                // 其他地区：默认使用中国运营商
+                else -> OperatorInfo(
+                    networkOperator = "46000",
+                    networkOperatorName = "中国移动",
+                    simOperator = "46000",
+                    simOperatorName = "中国移动",
+                    networkCountryIso = "cn",
+                    simCountryIso = "cn"
+                )
+            }
+        } catch (_: Exception) {
+            OperatorInfo(
+                networkOperator = "46000",
+                networkOperatorName = "中国移动",
+                simOperator = "46000",
+                simOperatorName = "中国移动",
+                networkCountryIso = "cn",
+                simCountryIso = "cn"
+            )
+        }
+    }
 }
