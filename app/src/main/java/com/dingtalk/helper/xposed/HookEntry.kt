@@ -117,7 +117,8 @@ class HookEntry : IXposedHookLoadPackage, IXposedHookZygoteInit {
         val batch2 = listOf(
             NmeaHooks(),
             FusedLocationHooks(),
-            DingTalkCompatHooks()
+            DingTalkCompatHooks(),
+            SafeguardHooks()
         )
 
         val batch3 = listOf(
