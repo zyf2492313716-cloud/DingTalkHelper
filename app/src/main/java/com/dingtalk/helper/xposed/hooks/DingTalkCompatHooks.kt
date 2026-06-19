@@ -4,6 +4,7 @@ import android.content.Context
 import com.dingtalk.helper.xposed.HookEntry
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookUtils
+import com.dingtalk.helper.xposed.utils.StackTraceFilter
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
@@ -19,18 +20,6 @@ class DingTalkCompatHooks : HookEntry.HookHandler {
             "/proc/self/maps",
             "/proc/" + "self" + "/maps",
             "proc/self/map"
-        )
-
-        private val XPOSED_STACK_KEYWORDS = setOf(
-            "de.robv.android.xposed",
-            "XposedBridge",
-            "lsposed",
-            "LSPosed",
-            "edxposed",
-            "EdXposed",
-            "riru",
-            "lsplant",
-            "com.dingtalk.helper.xposed"
         )
 
         private val RISK_CONTROL_CLASS_KEYWORDS = setOf(
@@ -247,14 +236,6 @@ class DingTalkCompatHooks : HookEntry.HookHandler {
 
     private fun hookStackTraceFilter(lpparam: XC_LoadPackage.LoadPackageParam) {
         val strategy = currentStrategy
-        val keywords = when (strategy) {
-            CompatStrategy.LEGACY -> XPOSED_STACK_KEYWORDS
-            CompatStrategy.STANDARD -> XPOSED_STACK_KEYWORDS
-            CompatStrategy.MODERN -> XPOSED_STACK_KEYWORDS + setOf(
-                "io.github.lsposed",
-                "LSPosed-Bridge"
-            )
-        }
 
         try {
             val throwableClass = XposedHelpers.findClass("java.lang.Throwable", lpparam.classLoader)
@@ -264,7 +245,7 @@ class DingTalkCompatHooks : HookEntry.HookHandler {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val trace = param.result as? Array<StackTraceElement> ?: return
                         val filtered = trace.filter { element ->
-                            keywords.none { kw -> element.className.contains(kw, ignoreCase = true) }
+                            !StackTraceFilter.isXposedRelated(element)
                         }.toTypedArray()
                         if (filtered.size != trace.size) {
                             param.result = filtered
@@ -284,9 +265,7 @@ class DingTalkCompatHooks : HookEntry.HookHandler {
                             val trace = traceField.get(param.thisObject) as? Array<StackTraceElement>
                                 ?: return
                             val filtered = trace.filter { element ->
-                                keywords.none { kw ->
-                                    element.className.contains(kw, ignoreCase = true)
-                                }
+                                !StackTraceFilter.isXposedRelated(element)
                             }.toTypedArray()
                             if (filtered.size != trace.size) {
                                 traceField.set(param.thisObject, filtered)

@@ -33,6 +33,7 @@ object Constants {
     const val KEY_HIDE_MOCK_LOCATION = "hide_mock_location"
     const val KEY_HIDE_RISK_CONTROL = "hide_risk_control"
     const val KEY_HIDE_APPS = "hide_apps"
+    const val KEY_AUTO_CORRELATION_ENABLED = "auto_correlation_enabled"
 
     // ==================== 默认值 ====================
     const val DEFAULT_LATITUDE = 39.9042  // 北京
@@ -195,7 +196,7 @@ object Constants {
     )
 
     // 模拟器文件特征路径
-    val EMULATOR_FILES = listOf(
+    val EMULATOR_FILES = setOf(
         "/dev/qemu_pipe",
         "/dev/qemud",
         "/dev/socket/qemud",

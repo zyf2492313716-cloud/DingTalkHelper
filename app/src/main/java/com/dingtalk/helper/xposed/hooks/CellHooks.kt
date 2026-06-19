@@ -107,11 +107,10 @@ class CellHooks : HookEntry.HookHandler {
      * 创建伪造的 GsmCellLocation
      */
     private fun createFakeGsmCellLocation(): GsmCellLocation {
-        val cellId = ConfigManager.getCellId()
-        val lac = ConfigManager.getLac()
+        val correlated = ConfigManager.getCorrelatedCellInfo()
 
         return GsmCellLocation().apply {
-            setLacAndCid(lac, cellId)
+            setLacAndCid(correlated.lac, correlated.cellId)
         }
     }
 
@@ -120,10 +119,11 @@ class CellHooks : HookEntry.HookHandler {
      */
     private fun createFakeCellInfoList(): List<CellInfo> {
         val cellInfoList = mutableListOf<CellInfo>()
-        val cellId = ConfigManager.getCellId()
-        val lac = ConfigManager.getLac()
-        val mcc = ConfigManager.getMcc()
-        val mnc = ConfigManager.getMnc()
+        val correlated = ConfigManager.getCorrelatedCellInfo()
+        val cellId = correlated.cellId
+        val lac = correlated.lac
+        val mcc = correlated.mcc
+        val mnc = correlated.mnc
         val timestamp = System.currentTimeMillis() * 1000
 
         // 创建 GSM 基站信息
@@ -168,11 +168,10 @@ class CellHooks : HookEntry.HookHandler {
      */
     private fun createFakeNeighboringCellInfo(): List<NeighboringCellInfo> {
         return try {
-            val cellId = ConfigManager.getCellId()
-            val lac = ConfigManager.getLac()
+            val correlated = ConfigManager.getCorrelatedCellInfo()
             // NeighboringCellInfo is deprecated, use reflection for compatibility
             val clazz = Class.forName("android.telephony.NeighboringCellInfo")
-            val obj = XposedHelpers.newInstance(clazz, lac, cellId, "GSM")
+            val obj = XposedHelpers.newInstance(clazz, correlated.lac, correlated.cellId, "GSM")
             listOf(obj as NeighboringCellInfo)
         } catch (e: Exception) {
             HookUtils.logDebug("$TAG: 创建邻区信息失败: ${e.message}")

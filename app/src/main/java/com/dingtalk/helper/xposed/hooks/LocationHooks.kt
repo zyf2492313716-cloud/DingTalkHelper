@@ -7,16 +7,15 @@ import android.location.LocationManager
 import android.os.Build
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
+import com.dingtalk.helper.xposed.data.FakeDataProvider
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.TimeUnit
 
 /**
@@ -36,279 +35,32 @@ class LocationHooks : HookEntry.HookHandler {
     companion object {
         private const val TAG = "${Constants.LOG_PREFIX}:Location"
 
-        // GPS 漂移范围（约 5-15 米）
-        private const val MAX_OFFSET = 0.00015
-
-        // 可变 TTL 范围（毫秒），模拟真实 GPS 芯片更新间隔
-        private const val CACHE_TTL_MIN_MS = 1000L
-        private const val CACHE_TTL_MAX_MS = 10000L
-
-        // 速度模拟范围（m/s）：静止 0~0.3，步行 0.8~1.5，车载 5~15
-        private const val SPEED_STILL_MAX = 0.3f
-        private const val SPEED_WALK_MIN = 0.8f
-        private const val SPEED_WALK_MAX = 1.5f
-
-        // 海拔漂移范围（米）
-        private const val ALTITUDE_DRIFT_MAX = 3.0
-
-        // 方向漂移范围（度）
-        private const val BEARING_DRIFT_MAX = 15.0f
-
-        // 历史轨迹最大记录数
-        private const val MAX_HISTORY_SIZE = 100
-
-        @Volatile
-        private var cachedLocation: Location? = null
-
-        @Volatile
-        private var lastCacheTime = 0L
-
-        @Volatile
-        private var currentCacheTtlMs = CACHE_TTL_MIN_MS
-
-        // 上一次返回的位置坐标，用于漂移连续性
-        @Volatile
-        private var lastLatitude = 0.0
-
-        @Volatile
-        private var lastLongitude = 0.0
-
-        @Volatile
-        private var lastAltitude = 0.0
-
-        @Volatile
-        private var lastBearing = 0f
-
-        @Volatile
-        private var lastSpeed = 0f
-
-        @Volatile
-        private var isInitialized = false
-
-        // 历史轨迹
-        private val locationHistory = CopyOnWriteArrayList<LocationEntry>()
-
         // 定时任务管理
         private val scheduledExecutor = Executors.newSingleThreadScheduledExecutor { r ->
             Thread(r, "LocationHooks-Scheduler").apply { isDaemon = true }
         }
         private val activeTasks = java.util.concurrent.ConcurrentHashMap<Any, ScheduledFuture<*>>()
 
-        /**
-         * 获取当前伪造位置（供其他 Hook 模块查询，确保一致性）
-         */
         fun getCurrentFakeLocation(): ConfigManager.FakeLocation {
-            val location = getOrCreateFakeLocation()
-            return ConfigManager.FakeLocation(
-                latitude = location.latitude,
-                longitude = location.longitude,
-                altitude = location.altitude,
-                speed = location.speed,
-                bearing = location.bearing,
-                accuracy = location.accuracy
-            )
+            return FakeDataProvider.getCurrentFakeLocation()
         }
 
-        /**
-         * 检查给定坐标是否与当前伪造位置匹配（容差 50 米）
-         * 供 WiFi/基站 Hook 进行一致性校验
-         */
         fun isLocationMatch(lat: Double, lng: Double): Boolean {
-            val current = getOrCreateFakeLocation()
-            val distance = calculateDistance(
-                current.latitude, current.longitude, lat, lng
-            )
-            return distance < 50.0
+            return FakeDataProvider.isLocationMatch(lat, lng)
         }
 
-        /**
-         * 获取历史轨迹（只读副本）
-         */
         fun getLocationHistory(): List<LocationEntry> {
-            return locationHistory.toList()
+            return FakeDataProvider.getLocationHistory().map {
+                LocationEntry(it.latitude, it.longitude, it.altitude, it.speed, it.bearing, it.timestamp)
+            }
         }
 
-        /**
-         * 获取或创建伪造位置（内部方法）
-         */
         internal fun getOrCreateFakeLocation(): Location {
-            val now = System.currentTimeMillis()
-            val cached = cachedLocation
-
-            if (cached != null && (now - lastCacheTime) < currentCacheTtlMs) {
-                return cached
-            }
-
-            val newLocation = createFakeLocationInternal()
-            cachedLocation = newLocation
-            lastCacheTime = now
-
-            // 生成下一次的随机 TTL
-            currentCacheTtlMs = CACHE_TTL_MIN_MS +
-                ThreadLocalRandom.current().nextInt((CACHE_TTL_MAX_MS - CACHE_TTL_MIN_MS + 1).toInt())
-
-            return newLocation
+            return FakeDataProvider.getOrCreateFakeLocation()
         }
 
-        /**
-         * 创建伪造位置（内部实现）
-         */
-        private fun createFakeLocationInternal(): Location {
-            val fakeConfig = ConfigManager.getFakeLocation()
-            val baseLat = fakeConfig.latitude
-            val baseLng = fakeConfig.longitude
-            val baseAlt = fakeConfig.altitude
-
-            // 漂移：在上一次位置基础上微调，保持连续性
-            val wasInitialized = isInitialized
-            val latDrift = (ThreadLocalRandom.current().nextDouble() * 2 - 1) * MAX_OFFSET
-            val lngDrift = (ThreadLocalRandom.current().nextDouble() * 2 - 1) * MAX_OFFSET
-
-            val newLat: Double
-            val newLng: Double
-            if (!wasInitialized) {
-                // 首次使用基准坐标 + 小偏移
-                newLat = baseLat + latDrift
-                newLng = baseLng + lngDrift
-                isInitialized = true
-            } else {
-                // 后续在上一次位置上漂移
-                newLat = lastLatitude + latDrift * 0.3
-                newLng = lastLongitude + lngDrift * 0.3
-            }
-
-            // 限制漂移范围：距基准点不超过 50 米
-            val distFromBase = calculateDistance(baseLat, baseLng, newLat, newLng)
-            val clampedLat: Double
-            val clampedLng: Double
-            if (distFromBase > 50.0) {
-                val ratio = 45.0 / distFromBase
-                clampedLat = baseLat + (newLat - baseLat) * ratio
-                clampedLng = baseLng + (newLng - baseLng) * ratio
-            } else {
-                clampedLat = newLat
-                clampedLng = newLng
-            }
-
-            // 海拔变化
-            val altDrift = (ThreadLocalRandom.current().nextDouble() * 2 - 1) * ALTITUDE_DRIFT_MAX
-            val newAlt = if (!wasInitialized) baseAlt else lastAltitude + altDrift * 0.3
-
-            // 速度模拟：大部分时间静止，偶尔步行速度
-            val movementRoll = ThreadLocalRandom.current().nextFloat()
-            val newSpeed = when {
-                movementRoll < 0.7f -> {
-                    // 70% 概率静止
-                    ThreadLocalRandom.current().nextFloat() * SPEED_STILL_MAX
-                }
-                movementRoll < 0.95f -> {
-                    // 25% 概率步行
-                    SPEED_WALK_MIN + ThreadLocalRandom.current().nextFloat() * (SPEED_WALK_MAX - SPEED_WALK_MIN)
-                }
-                else -> {
-                    // 5% 概率快速移动
-                    2.0f + ThreadLocalRandom.current().nextFloat() * 3.0f
-                }
-            }
-
-            // 方向变化：在上一次方向基础上微调
-            val bearingDrift = (ThreadLocalRandom.current().nextFloat() * 2 - 1) * BEARING_DRIFT_MAX
-            val newBearing = if (!wasInitialized) {
-                ThreadLocalRandom.current().nextFloat() * 360f
-            } else {
-                ((lastBearing + bearingDrift) % 360f + 360f) % 360f
-            }
-
-            // 精度模拟
-            val accuracy = fakeConfig.accuracy + (ThreadLocalRandom.current().nextFloat() * 6 - 3f)
-
-            // 更新状态
-            lastLatitude = clampedLat
-            lastLongitude = clampedLng
-            lastAltitude = newAlt
-            lastBearing = newBearing
-            lastSpeed = newSpeed
-
-            // 记录历史
-            recordHistory(clampedLat, clampedLng, newAlt, newSpeed, newBearing)
-
-            return Location(LocationManager.GPS_PROVIDER).apply {
-                latitude = clampedLat
-                longitude = clampedLng
-                altitude = newAlt
-                speed = newSpeed
-                bearing = newBearing
-                this.accuracy = accuracy
-                time = System.currentTimeMillis()
-                elapsedRealtimeNanos = android.os.SystemClock.elapsedRealtimeNanos()
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
-                    // 确保 hasElapsedRealtimeNanos() 返回 true
-                    try {
-                        val field = Location::class.java.getDeclaredField("mElapsedRealtimeNanos")
-                        field.isAccessible = true
-                        field.setLong(this, elapsedRealtimeNanos)
-                    } catch (_: Exception) {}
-                }
-
-                clearMockFlag()
-
-                val extras = android.os.Bundle()
-                extras.putInt("satellites", 12)
-                setExtras(extras)
-            }
-        }
-
-        /**
-         * 记录历史位置
-         */
-        private fun recordHistory(
-            lat: Double, lng: Double, alt: Double, speed: Float, bearing: Float
-        ) {
-            locationHistory.add(
-                LocationEntry(lat, lng, alt, speed, bearing, System.currentTimeMillis())
-            )
-            while (locationHistory.size > MAX_HISTORY_SIZE) {
-                locationHistory.removeAt(0)
-            }
-        }
-
-        /**
-         * 清除 Location 的 mock 标记
-         */
-        @SuppressLint("BlockedPrivateApi")
-        private fun Location.clearMockFlag() {
-            try {
-                val field = Location::class.java.getDeclaredField("mIsMock")
-                field.isAccessible = true
-                field.setBoolean(this, false)
-            } catch (_: Exception) {}
-        }
-
-        /**
-         * 计算两个坐标之间的距离（米），使用 Haversine 公式
-         */
-        private fun calculateDistance(
-            lat1: Double, lng1: Double, lat2: Double, lng2: Double
-        ): Double {
-            val earthRadius = 6371000.0
-            val dLat = Math.toRadians(lat2 - lat1)
-            val dLng = Math.toRadians(lng2 - lng1)
-            val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
-                Math.sin(dLng / 2) * Math.sin(dLng / 2)
-            val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-            return earthRadius * c
-        }
-
-        /**
-         * 重置状态（配置变更时调用）
-         */
         fun reset() {
-            cachedLocation = null
-            lastCacheTime = 0L
-            isInitialized = false
-            locationHistory.clear()
+            FakeDataProvider.resetLocation()
             activeTasks.values.forEach { it.cancel(false) }
             activeTasks.clear()
         }
@@ -756,18 +508,20 @@ class LocationHooks : HookEntry.HookHandler {
     @SuppressLint("BlockedPrivateApi")
     private fun createFakeGnssStatus(): GnssStatus {
         val status = XposedHelpers.newInstance(GnssStatus::class.java) as GnssStatus
-        val satelliteCount = 12
+        val sats = FakeDataProvider.getSatellites()
+        val satelliteCount = sats.size
 
         XposedHelpers.setIntField(status, "mSvCount", satelliteCount)
 
-        val prns = IntArray(satelliteCount) { it + 1 }
-        val cn0s = FloatArray(satelliteCount) { 35f + (Math.random() * 10 - 5).toFloat() }
-        val elevations = FloatArray(satelliteCount) { 45f + (Math.random() * 30 - 15).toFloat() }
-        val azimuths = FloatArray(satelliteCount) { (it * 30f + Math.random() * 20).toFloat() % 360f }
-        val usedInFix = BooleanArray(satelliteCount) { it < 8 }
+        val prns = IntArray(satelliteCount) { sats[it].svid }
+        val cn0s = FloatArray(satelliteCount) { sats[it].cn0 + (Math.random() * 4 - 2).toFloat() }
+        val elevations = FloatArray(satelliteCount) { sats[it].elevation }
+        val azimuths = FloatArray(satelliteCount) { sats[it].azimuth }
+        val usedInFix = BooleanArray(satelliteCount) { sats[it].usedInFix }
         val ephemeris = BooleanArray(satelliteCount) { true }
         val almanac = BooleanArray(satelliteCount) { true }
-        val carrierFreqs = FloatArray(satelliteCount) { 1575.42f }
+        val carrierFreqs = FloatArray(satelliteCount) { sats[it].carrierFrequencyHz }
+        val constellationTypes = IntArray(satelliteCount) { sats[it].constellationType }
 
         XposedHelpers.setObjectField(status, "mPrnWithFlags", IntArray(satelliteCount * 2) { i ->
             if (i < satelliteCount) prns[i] else 0
@@ -779,7 +533,7 @@ class LocationHooks : HookEntry.HookHandler {
         XposedHelpers.setObjectField(status, "mHasEphemerisData", ephemeris)
         XposedHelpers.setObjectField(status, "mHasAlmanacData", almanac)
         XposedHelpers.setObjectField(status, "mCarrierFreqHz", carrierFreqs)
-        XposedHelpers.setObjectField(status, "mConstellationTypes", IntArray(satelliteCount) { 1 })
+        XposedHelpers.setObjectField(status, "mConstellationTypes", constellationTypes)
 
         return status
     }

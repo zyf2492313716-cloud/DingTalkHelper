@@ -7,6 +7,7 @@ import android.location.GnssStatus
 import android.os.Build
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
+import com.dingtalk.helper.xposed.data.FakeDataProvider
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
@@ -35,86 +36,22 @@ class GnssHooks : HookEntry.HookHandler {
         private const val STATE_SUBFRAME_SYNC = 8
         private const val FULL_STATE = STATE_CODE_LOCK or STATE_TOW_DECODED or STATE_BIT_SYNC or STATE_SUBFRAME_SYNC
 
-        private const val GNSS_CONSTELLATION_GPS = 1
-        private const val GNSS_CONSTELLATION_SBAS = 2
-        private const val GNSS_CONSTELLATION_GLONASS = 3
-        private const val GNSS_CONSTELLATION_QZSS = 4
-        private const val GNSS_CONSTELLATION_BEIDOU = 5
-        private const val GNSS_CONSTELLATION_GALILEO = 6
-        private const val GNSS_CONSTELLATION_IRNSS = 7
-
-        private const val GPS_L1 = 1575.42f * 1_000_000f
-        private const val GPS_L5 = 1176.45f * 1_000_000f
-        private const val GLONASS_L1_BASE = 1602.0f * 1_000_000f
-        private const val GLONASS_L1_STEP = 0.5625f * 1_000_000f
-        private const val BEIDOU_B1I = 1561.098f * 1_000_000f
-        private const val BEIDOU_B1C = 1575.42f * 1_000_000f
-        private const val GALILEO_E1 = 1575.42f * 1_000_000f
-        private const val GALILEO_E5A = 1176.45f * 1_000_000f
-
         private const val FULL_BIAS_BASE_GPS_NANOS = (GPS_EPOCH_OFFSET_SECONDS * 1_000_000_000L)
         private const val FULL_BIAS_DRIFT_PER_DAY_NANOS = 5L
-    }
 
-    private data class SatelliteInfo(
-        val svid: Int,
-        val constellationType: Int,
-        val cn0: Float,
-        val elevation: Float,
-        val azimuth: Float,
-        val usedInFix: Boolean,
-        val carrierFrequencyHz: Float
-    )
-
-        private val satellites: List<SatelliteInfo> by lazy { generateSatellites() }
-
-    private fun generateSatellites(): List<SatelliteInfo> {
-        val result = mutableListOf<SatelliteInfo>()
-        val random = java.util.Random(System.currentTimeMillis() xor android.os.Process.myPid().toLong())
-        val usedCount = 12 + random.nextInt(5)
-
-        val gpsCount = 7 + random.nextInt(4)
-        val glonassCount = 4 + random.nextInt(3)
-        val beidouCount = 5 + random.nextInt(4)
-        val galileoCount = 3 + random.nextInt(3)
-
-        fun addSatellites(count: Int, constellation: Int, svidRange: IntRange) {
-            val svids = svidRange.toList().shuffled(random).take(count)
-            for (svid in svids) {
-                val cn0 = (28f + random.nextFloat() * 18f)
-                val elevation = (10f + random.nextFloat() * 70f)
-                val azimuth = (random.nextFloat() * 360f)
-                val carrierFrequencyHz = getCarrierFrequency(constellation, svid, random)
-                result.add(SatelliteInfo(svid, constellation, cn0, elevation, azimuth, result.size < usedCount, carrierFrequencyHz))
+        // 类级别的 ScheduledExecutorService，避免每次注册都创建新 executor
+        private val scheduledExecutor: java.util.concurrent.ScheduledExecutorService by lazy {
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+                Thread(r, "GnssNavMsg-Scheduler").apply { isDaemon = true }
             }
         }
 
-        addSatellites(gpsCount, GNSS_CONSTELLATION_GPS, 1..32)
-        addSatellites(glonassCount, GNSS_CONSTELLATION_GLONASS, 1..24)
-        addSatellites(beidouCount, GNSS_CONSTELLATION_BEIDOU, 1..37)
-        addSatellites(galileoCount, GNSS_CONSTELLATION_GALILEO, 1..36)
-
-        return result.shuffled(random)
+        // 跟踪活跃的定时任务，用于取消
+        private val activeNavMessageTasks = java.util.concurrent.ConcurrentHashMap<GnssNavigationMessage.Callback, java.util.concurrent.ScheduledFuture<*>>()
     }
 
-    private fun getCarrierFrequency(constellation: Int, svid: Int, random: java.util.Random): Float {
-        return when (constellation) {
-            GNSS_CONSTELLATION_GPS -> {
-                if (random.nextBoolean()) GPS_L1 else GPS_L5
-            }
-            GNSS_CONSTELLATION_GLONASS -> {
-                val k = (svid - 1) % 14 - 7
-                GLONASS_L1_BASE + k * GLONASS_L1_STEP
-            }
-            GNSS_CONSTELLATION_BEIDOU -> {
-                if (random.nextBoolean()) BEIDOU_B1I else BEIDOU_B1C
-            }
-            GNSS_CONSTELLATION_GALILEO -> {
-                if (random.nextBoolean()) GALILEO_E1 else GALILEO_E5A
-            }
-            else -> GPS_L1
-        }
-    }
+    private val satellites: List<FakeDataProvider.SatelliteInfo>
+        get() = FakeDataProvider.getSatellites()
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (!ConfigManager.isEnabled()) return
@@ -149,7 +86,8 @@ class GnssHooks : HookEntry.HookHandler {
                 gnssStatusClass, "getSvid", Int::class.java,
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return satellites[param.args[0] as Int].svid
+                        val index = param.args[0] as Int
+                        return satellites.getOrElse(index) { satellites.last() }.svid
                     }
                 }
             )
@@ -330,7 +268,7 @@ class GnssHooks : HookEntry.HookHandler {
     /**
      * 创建伪造的 GnssMeasurement 对象
      */
-    private fun createFakeGnssMeasurement(sat: SatelliteInfo, index: Int): GnssMeasurement {
+    private fun createFakeGnssMeasurement(sat: FakeDataProvider.SatelliteInfo, index: Int): GnssMeasurement {
         val cn0 = sat.cn0 + (java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 4f - 2f).toFloat()
         val pseudorangeRate = java.util.Random(index.toLong() + 1000).nextGaussian() * 200.0
         val gpsTimeNanos = (System.currentTimeMillis() / 1000 - GPS_EPOCH_OFFSET_SECONDS) * 1_000_000_000L
@@ -482,6 +420,12 @@ class GnssHooks : HookEntry.HookHandler {
                         it is java.util.concurrent.Executor
                     } as? java.util.concurrent.Executor
 
+                    val targetExecutor = executor ?: handler?.let { h ->
+                        java.util.concurrent.Executor { r -> h.post(r) }
+                    } ?: java.util.concurrent.Executor { r ->
+                        android.os.Handler(android.os.Looper.getMainLooper()).post(r)
+                    }
+
                     val deliver = {
                         try {
                             val fakeMessage = createFakeGnssNavigationMessage()
@@ -491,23 +435,37 @@ class GnssHooks : HookEntry.HookHandler {
                         }
                     }
 
-                    val postRunnable: (Runnable) -> Unit = { runnable ->
-                        when {
-                            handler != null -> handler.post(runnable)
-                            executor != null -> executor.execute(runnable)
-                            else -> android.os.Handler(android.os.Looper.getMainLooper()).post(runnable)
+                    targetExecutor.execute { deliver() }
+
+                    // 取消该 callback 之前可能存在的定时任务
+                    activeNavMessageTasks[callback]?.cancel(false)
+
+                    // 使用类级别的 scheduledExecutor，避免每次创建新 executor
+                    val future = scheduledExecutor.scheduleAtFixedRate({
+                        try { targetExecutor.execute { deliver() } } catch (_: Exception) {}
+                    }, 1000, 1000, java.util.concurrent.TimeUnit.MILLISECONDS)
+
+                    // 记录活跃任务
+                    activeNavMessageTasks[callback] = future
+                }
+            }
+
+            // Hook unregisterGnssNavigationMessageCallback - 取消定时任务
+            try {
+                XposedHelpers.findAndHookMethod(
+                    locationManagerClass,
+                    "unregisterGnssNavigationMessageCallback",
+                    GnssNavigationMessage.Callback::class.java,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val callback = param.args[0] as? GnssNavigationMessage.Callback ?: return
+                            activeNavMessageTasks.remove(callback)?.cancel(false)
                         }
                     }
-
-                    postRunnable(Runnable { deliver() })
-
-                    val scheduledExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
-                        Thread(r, "GnssNavMsg-Scheduler").apply { isDaemon = true }
-                    }
-                    scheduledExecutor.scheduleAtFixedRate({
-                        try { deliver() } catch (_: Exception) {}
-                    }, 1000, 1000, java.util.concurrent.TimeUnit.MILLISECONDS)
-                }
+                )
+                HookUtils.log("$TAG: unregisterGnssNavigationMessageCallback Hook 完成")
+            } catch (e: Exception) {
+                HookUtils.log("$TAG: unregisterGnssNavigationMessageCallback Hook 失败: ${e.message}")
             }
 
             // (Callback, Handler)
