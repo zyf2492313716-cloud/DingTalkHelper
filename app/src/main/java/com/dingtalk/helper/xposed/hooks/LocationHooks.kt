@@ -14,7 +14,10 @@ import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.TimeUnit
 
 /**
  * GPS 位置伪造 Hook
@@ -84,6 +87,12 @@ class LocationHooks : HookEntry.HookHandler {
 
         // 历史轨迹
         private val locationHistory = CopyOnWriteArrayList<LocationEntry>()
+
+        // 定时任务管理
+        private val scheduledExecutor = Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "LocationHooks-Scheduler").apply { isDaemon = true }
+        }
+        private val activeTasks = java.util.concurrent.ConcurrentHashMap<Any, ScheduledFuture<*>>()
 
         /**
          * 获取当前伪造位置（供其他 Hook 模块查询，确保一致性）
@@ -243,6 +252,10 @@ class LocationHooks : HookEntry.HookHandler {
                 }
 
                 clearMockFlag()
+
+                val extras = android.os.Bundle()
+                extras.putInt("satellites", 12)
+                setExtras(extras)
             }
         }
 
@@ -296,6 +309,8 @@ class LocationHooks : HookEntry.HookHandler {
             lastCacheTime = 0L
             isInitialized = false
             locationHistory.clear()
+            activeTasks.values.forEach { it.cancel(false) }
+            activeTasks.clear()
         }
     }
 
@@ -331,6 +346,7 @@ class LocationHooks : HookEntry.HookHandler {
         hookRequestLocationUpdates(locationManagerClass)
         hookCurrentLocation(locationManagerClass)
         hookGnssStatus(locationManagerClass)
+        hookProviderEnabled(locationManagerClass)
 
         if (ConfigManager.isHideMockLocationEnabled()) {
             hookLocationClass(lpparam)
@@ -433,35 +449,72 @@ class LocationHooks : HookEntry.HookHandler {
         }
     }
 
+    private fun scheduleLocationUpdates(
+        listener: Any,
+        minTimeMs: Long,
+        callback: (Location) -> Unit
+    ) {
+        cancelLocationUpdates(listener)
+        val intervalMs = maxOf(minTimeMs, 1000L)
+        val future = scheduledExecutor.scheduleAtFixedRate({
+            try {
+                val location = getOrCreateFakeLocation()
+                callback(location)
+            } catch (_: Exception) {}
+        }, 100, intervalMs, TimeUnit.MILLISECONDS)
+        activeTasks[listener] = future
+    }
+
+    private fun schedulePendingIntentUpdates(
+        key: Any,
+        pendingIntent: android.app.PendingIntent,
+        minTimeMs: Long
+    ) {
+        cancelLocationUpdates(key)
+        val intervalMs = maxOf(minTimeMs, 1000L)
+        val future = scheduledExecutor.scheduleAtFixedRate({
+            try {
+                val location = getOrCreateFakeLocation()
+                val intent = android.content.Intent().apply {
+                    putExtra(android.location.LocationManager.KEY_LOCATION_CHANGED, location)
+                }
+                val context = android.app.AndroidAppHelper.currentApplication()
+                pendingIntent.send(context, 0, intent)
+            } catch (_: Exception) {}
+        }, 100, intervalMs, TimeUnit.MILLISECONDS)
+        activeTasks[key] = future
+    }
+
+    private fun cancelLocationUpdates(key: Any) {
+        activeTasks.remove(key)?.cancel(false)
+    }
+
     private fun hookRequestLocationUpdates(clazz: Class<*>) {
         val hookCallback = object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 if (!shouldHook()) return
 
+                val minTimeMs = (param.args[1] as? Long) ?: 1000L
+
                 val listener = param.args.firstOrNull {
                     it is android.location.LocationListener
                 } as? android.location.LocationListener ?: return
 
-                val fakeLocation = getOrCreateFakeLocation()
+                param.result = null
 
-                Thread {
-                    try {
-                        Thread.sleep(100)
-                        listener.onLocationChanged(fakeLocation)
-                    } catch (_: Exception) {}
-                }.start()
+                scheduleLocationUpdates(listener, minTimeMs) { location ->
+                    listener.onLocationChanged(location)
+                }
             }
         }
 
         val signatures = listOf(
-            // (String, long, float, LocationListener)
             arrayOf(
                 String::class.java,
                 Long::class.javaPrimitiveType,
                 Float::class.javaPrimitiveType,
                 android.location.LocationListener::class.java
             ),
-            // (String, long, float, LocationListener, Looper)
             arrayOf(
                 String::class.java,
                 Long::class.javaPrimitiveType,
@@ -487,7 +540,6 @@ class LocationHooks : HookEntry.HookHandler {
             }
         }
 
-        // (String, long, float, PendingIntent)
         try {
             XposedHelpers.findAndHookMethod(
                 clazz,
@@ -500,19 +552,12 @@ class LocationHooks : HookEntry.HookHandler {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (!shouldHook()) return
 
+                        val minTimeMs = (param.args[1] as? Long) ?: 1000L
                         val pendingIntent = param.args[3] as? android.app.PendingIntent ?: return
-                        val fakeLocation = getOrCreateFakeLocation()
 
-                        Thread {
-                            try {
-                                Thread.sleep(100)
-                                val intent = android.content.Intent().apply {
-                                    putExtra(android.location.LocationManager.KEY_LOCATION_CHANGED, fakeLocation)
-                                }
-                                val context = android.app.AndroidAppHelper.currentApplication()
-                                pendingIntent.send(context, 0, intent)
-                            } catch (_: Exception) {}
-                        }.start()
+                        param.result = null
+
+                        schedulePendingIntentUpdates(pendingIntent, pendingIntent, minTimeMs)
                     }
                 }
             )
@@ -523,7 +568,6 @@ class LocationHooks : HookEntry.HookHandler {
             HookUtils.logDebug("$TAG: requestLocationUpdates(PendingIntent) Hook 失败: ${e.message}")
         }
 
-        // API 30+: (String, long, float, LocationListener, Executor)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 XposedHelpers.findAndHookMethod(
@@ -543,6 +587,79 @@ class LocationHooks : HookEntry.HookHandler {
                 HookUtils.logDebug("$TAG: requestLocationUpdates(Executor) Hook 失败: ${e.message}")
             }
         }
+
+        hookRemoveUpdates(clazz)
+    }
+
+    private fun hookRemoveUpdates(clazz: Class<*>) {
+        try {
+            XposedHelpers.findAndHookMethod(
+                clazz,
+                "removeUpdates",
+                android.location.LocationListener::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val listener = param.args[0] ?: return
+                        cancelLocationUpdates(listener)
+                    }
+                }
+            )
+        } catch (_: Exception) {}
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                clazz,
+                "removeUpdates",
+                android.app.PendingIntent::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val pendingIntent = param.args[0] ?: return
+                        cancelLocationUpdates(pendingIntent)
+                    }
+                }
+            )
+        } catch (_: Exception) {}
+    }
+
+    private fun hookProviderEnabled(clazz: Class<*>) {
+        try {
+            XposedHelpers.findAndHookMethod(
+                clazz,
+                "isProviderEnabled",
+                String::class.java,
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        return param.args[0] == LocationManager.GPS_PROVIDER || param.args[0] == LocationManager.NETWORK_PROVIDER
+                    }
+                }
+            )
+            HookUtils.logDebug("$TAG: isProviderEnabled Hook 完成")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: isProviderEnabled Hook 失败: ${e.message}")
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                clazz,
+                "getProviders",
+                Boolean::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (param.args[0] == true) {
+                            val providers = param.result as? List<*> ?: return
+                            if (!providers.contains(LocationManager.GPS_PROVIDER)) {
+                                val mutable = providers.toMutableList()
+                                mutable.add(0, LocationManager.GPS_PROVIDER)
+                                param.result = mutable
+                            }
+                        }
+                    }
+                }
+            )
+            HookUtils.logDebug("$TAG: getProviders Hook 完成")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: getProviders Hook 失败: ${e.message}")
+        }
     }
 
     private fun signatureToString(signature: Array<out Class<*>?>): String {
@@ -550,24 +667,121 @@ class LocationHooks : HookEntry.HookHandler {
     }
 
     private fun hookGnssStatus(clazz: Class<*>) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+
+        val hookStatusCallback = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!shouldHook()) return
+
+                val callback = param.args.firstOrNull {
+                    it is GnssStatus.Callback
+                } as? GnssStatus.Callback ?: return
+
+                val handler = param.args.firstOrNull {
+                    it is android.os.Handler
+                } as? android.os.Handler
+                    ?: android.os.Handler(android.os.Looper.getMainLooper())
+
+                param.result = true
+
+                handler.post {
+                    try {
+                        callback.onStarted()
+                    } catch (_: Exception) {}
+
+                    scheduledExecutor.schedule({
+                        try {
+                            val fakeStatus = createFakeGnssStatus()
+                            callback.onFirstFix(0)
+                            callback.onSatelliteStatusChanged(fakeStatus)
+                        } catch (_: Exception) {}
+                    }, 200, TimeUnit.MILLISECONDS)
+                }
+            }
+        }
+
         try {
             XposedHelpers.findAndHookMethod(
                 clazz,
                 "registerGnssStatusCallback",
                 GnssStatus.Callback::class.java,
                 android.os.Handler::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (shouldHook()) {
-                            param.result = false
-                            HookUtils.logDebug("$TAG: GNSS 状态回调已阻止")
-                        }
-                    }
-                }
+                hookStatusCallback
             )
         } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: GNSS 状态 Hook 失败: ${e.message}")
+            HookUtils.logDebug("$TAG: GNSS 状态(Handler) Hook 失败: ${e.message}")
         }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clazz,
+                    "registerGnssStatusCallback",
+                    java.util.concurrent.Executor::class.java,
+                    GnssStatus.Callback::class.java,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (!shouldHook()) return
+
+                            val executor = param.args.firstOrNull {
+                                it is java.util.concurrent.Executor
+                            } as? java.util.concurrent.Executor ?: return
+
+                            val callback = param.args.firstOrNull {
+                                it is GnssStatus.Callback
+                            } as? GnssStatus.Callback ?: return
+
+                            param.result = true
+
+                            executor.execute {
+                                try {
+                                    callback.onStarted()
+                                } catch (_: Exception) {}
+
+                                scheduledExecutor.schedule({
+                                    try {
+                                        val fakeStatus = createFakeGnssStatus()
+                                        callback.onFirstFix(0)
+                                        callback.onSatelliteStatusChanged(fakeStatus)
+                                    } catch (_: Exception) {}
+                                }, 200, TimeUnit.MILLISECONDS)
+                            }
+                        }
+                    }
+                )
+            } catch (_: Exception) {}
+        }
+    }
+
+    @SuppressLint("BlockedPrivateApi")
+    private fun createFakeGnssStatus(): GnssStatus {
+        val status = XposedHelpers.newInstance(GnssStatus::class.java) as GnssStatus
+        val satelliteCount = 12
+
+        XposedHelpers.setIntField(status, "mSvCount", satelliteCount)
+
+        val prns = IntArray(satelliteCount) { it + 1 }
+        val cn0s = FloatArray(satelliteCount) { 35f + (Math.random() * 10 - 5).toFloat() }
+        val elevations = FloatArray(satelliteCount) { 45f + (Math.random() * 30 - 15).toFloat() }
+        val azimuths = FloatArray(satelliteCount) { (it * 30f + Math.random() * 20).toFloat() % 360f }
+        val usedInFix = BooleanArray(satelliteCount) { it < 8 }
+        val ephemeris = BooleanArray(satelliteCount) { true }
+        val almanac = BooleanArray(satelliteCount) { true }
+        val carrierFreqs = FloatArray(satelliteCount) { 1575.42f }
+
+        XposedHelpers.setObjectField(status, "mPrnWithFlags", IntArray(satelliteCount * 2) { i ->
+            if (i < satelliteCount) prns[i] else 0
+        })
+        XposedHelpers.setObjectField(status, "mCn0DbHz", cn0s)
+        XposedHelpers.setObjectField(status, "mSvElevations", elevations)
+        XposedHelpers.setObjectField(status, "mSvAzimuths", azimuths)
+        XposedHelpers.setObjectField(status, "mSvUsedInFix", usedInFix)
+        XposedHelpers.setObjectField(status, "mHasEphemerisData", ephemeris)
+        XposedHelpers.setObjectField(status, "mHasAlmanacData", almanac)
+        XposedHelpers.setObjectField(status, "mCarrierFreqHz", carrierFreqs)
+        XposedHelpers.setObjectField(status, "mConstellationTypes", IntArray(satelliteCount) { 1 })
+
+        return status
     }
 
     /**
@@ -616,12 +830,24 @@ class LocationHooks : HookEntry.HookHandler {
                 "android.location.Location", lpparam.classLoader
             )
 
-            // Hook getProvider：返回 "gps" 而非 "fused" 或 "network"
+            // Hook getProvider：仅对 mock 位置返回 "gps"
             XposedHelpers.findAndHookMethod(
                 locationClass, "getProvider",
-                object : XC_MethodReplacement() {
-                    override fun replaceHookedMethod(param: MethodHookParam): Any {
-                        return LocationManager.GPS_PROVIDER
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val location = param.thisObject as Location
+                        val provider = param.result as? String ?: return
+                        if (provider == "fused" || provider == "network" || provider == "passive") {
+                            try {
+                                val field = Location::class.java.getDeclaredField("mIsMock")
+                                field.isAccessible = true
+                                if (field.getBoolean(location)) {
+                                    param.result = LocationManager.GPS_PROVIDER
+                                }
+                            } catch (_: Exception) {
+                                param.result = LocationManager.GPS_PROVIDER
+                            }
+                        }
                     }
                 }
             )
@@ -645,11 +871,14 @@ class LocationHooks : HookEntry.HookHandler {
                 }
             )
 
-            // Hook hasBearing：始终返回 true
+            // Hook hasBearing：检查 bearing 是否有效
             XposedHelpers.findAndHookMethod(
                 locationClass, "hasBearing",
                 object : XC_MethodReplacement() {
-                    override fun replaceHookedMethod(param: MethodHookParam): Any = true
+                    override fun replaceHookedMethod(param: MethodHookParam): Any {
+                        val bearing = (param.thisObject as Location).bearing
+                        return !bearing.isNaN()
+                    }
                 }
             )
 

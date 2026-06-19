@@ -41,37 +41,105 @@ class EmulatorHooks : HookEntry.HookHandler {
             "/system/lib64/libc_malloc_debug_qemu.so"
         )
 
-        // 真实设备配置 (Samsung Galaxy S24 Ultra)
-        private const val DEVICE_BRAND = "samsung"
-        private const val DEVICE_MODEL = "SM-S928B"
-        private const val DEVICE_DEVICE = "e3q"
-        private const val DEVICE_PRODUCT = "e3q"
-        private const val DEVICE_BOARD = "pineapple"
-        private const val DEVICE_HARDWARE = "pineapple"
-        private const val DEVICE_MANUFACTURER = "samsung"
-        private const val DEVICE_FINGERPRINT =
-            "samsung/e3q/e3q:14/UP1A.231005.007/S928BXXU3AXK4:user/release-keys"
-        private const val DEVICE_DISPLAY = "UP1A.231005.007"
-        private const val DEVICE_BUILD_TYPE = "user"
-        private const val DEVICE_BUILD_TAGS = "release-keys"
-        private const val DEVICE_SERIAL = "R5CX21ABCDEF"
+        private data class DeviceConfig(
+            val brand: String,
+            val model: String,
+            val device: String,
+            val product: String,
+            val board: String,
+            val hardware: String,
+            val manufacturer: String,
+            val fingerprint: String,
+            val display: String,
+            val incremental: String,
+            val release: String,
+            val sdkInt: Int,
+            val securityPatch: String,
+            val serial: String
+        )
 
-        // CPU 核心数
+        private val DEVICE_PROFILES = listOf(
+            DeviceConfig(
+                brand = "samsung", model = "SM-S928B", device = "e3q", product = "e3q",
+                board = "pineapple", hardware = "pineapple", manufacturer = "samsung",
+                fingerprint = "samsung/e3q/e3q:14/UP1A.231005.007/S928BXXU3AXK4:user/release-keys",
+                display = "UP1A.231005.007", incremental = "S928BXXU3AXK4",
+                release = "14", sdkInt = 34, securityPatch = "2024-11-01", serial = "R5CX21ABCDEF"
+            ),
+            DeviceConfig(
+                brand = "samsung", model = "SM-S911B", device = "r11", product = "r11",
+                board = "taro", hardware = "taro", manufacturer = "samsung",
+                fingerprint = "samsung/r11/r11:14/UP1A.231005.007/S911BXXU5CWK1:user/release-keys",
+                display = "UP1A.231005.007", incremental = "S911BXXU5CWK1",
+                release = "14", sdkInt = 34, securityPatch = "2024-11-01", serial = "R5CXA0ABCDEF"
+            ),
+            DeviceConfig(
+                brand = "Xiaomi", model = "23127PN0CC", device = "houji", product = "houji",
+                board = "taro", hardware = "qcom", manufacturer = "Xiaomi",
+                fingerprint = "Xiaomi/houji/houji:14/UKQ1.231003.001/V816.0.24.10.17.DEV:user/release-keys",
+                display = "UKQ1.231003.001", incremental = "V816.0.24.10.17.DEV",
+                release = "14", sdkInt = 34, securityPatch = "2024-10-01", serial = "XA0BCDEF1234"
+            ),
+            DeviceConfig(
+                brand = "OnePlus", model = "CPH2573", device = "aston", product = "aston",
+                board = "taro", hardware = "qcom", manufacturer = "OnePlus",
+                fingerprint = "OnePlus/aston/aston:14/UKQ1.230924.001/R.136e757_1:user/release-keys",
+                display = "UKQ1.230924.001", incremental = "R.136e757_1",
+                release = "14", sdkInt = 34, securityPatch = "2024-09-01", serial = "OP5ABCDEF123"
+            ),
+            DeviceConfig(
+                brand = "google", model = "Pixel 8 Pro", device = "shiba", product = "shiba",
+                board = "tensor", hardware = "tensor", manufacturer = "Google",
+                fingerprint = "google/shiba/shiba:14/UD1A.231105.004/11021471:user/release-keys",
+                display = "UD1A.231105.004", incremental = "11021471",
+                release = "14", sdkInt = 34, securityPatch = "2024-11-05", serial = "GP8ABCDEF123"
+            )
+        )
+
         private const val CPU_CORES = 8
-
-        // 内存大小 (bytes) - 12GB
         private const val MEMORY_SIZE = 12884901888L
 
-        // IMEI 格式: 15位随机数
-        private fun generateIMEI(): String {
+        private val SELECTED_DEVICE by lazy { DEVICE_PROFILES.random() }
+        private val DEVICE_SEED by lazy { (SELECTED_DEVICE.model.hashCode().toLong() shl 32) or (android.os.Build.SERIAL.hashCode().toLong() and 0xFFFFFFFFL) }
+
+        fun getRandomIMEI(): String {
+            val rng = java.util.Random(DEVICE_SEED xor 0x494D4549)
             val sb = StringBuilder("86")
-            repeat(13) { sb.append((0..9).random()) }
+            repeat(13) { sb.append(rng.nextInt(10)) }
             return sb.toString()
         }
+
+        fun getRandomAndroidID(): String {
+            val rng = java.util.Random(DEVICE_SEED xor 0x414E4449)
+            val chars = "0123456789abcdef"
+            return buildString(16) { repeat(16) { append(chars[rng.nextInt(16)]) } }
+        }
+
+        fun getRandomSerial(): String = SELECTED_DEVICE.serial
+
+        fun getRandomIMSI(): String {
+            val rng = java.util.Random(DEVICE_SEED xor 0x494D5349)
+            val sb = StringBuilder("46000")
+            repeat(10) { sb.append(rng.nextInt(10)) }
+            return sb.toString()
+        }
+
+        fun getDeviceBrand(): String = SELECTED_DEVICE.brand
+        fun getDeviceModel(): String = SELECTED_DEVICE.model
+        fun getDeviceDevice(): String = SELECTED_DEVICE.device
+        fun getDeviceProduct(): String = SELECTED_DEVICE.product
+        fun getDeviceBoard(): String = SELECTED_DEVICE.board
+        fun getDeviceHardware(): String = SELECTED_DEVICE.hardware
+        fun getDeviceManufacturer(): String = SELECTED_DEVICE.manufacturer
+        fun getDeviceFingerprint(): String = SELECTED_DEVICE.fingerprint
+        fun getDeviceDisplay(): String = SELECTED_DEVICE.display
+        fun getDeviceIncremental(): String = SELECTED_DEVICE.incremental
+        fun getDeviceRelease(): String = SELECTED_DEVICE.release
+        fun getDeviceSdkInt(): Int = SELECTED_DEVICE.sdkInt
+        fun getDeviceSecurityPatch(): String = SELECTED_DEVICE.securityPatch
     }
 
-    // 设备特定的 IMEI（每个实例不同）
-    private val deviceIMEI by lazy { generateIMEI() }
+    private val deviceIMEI by lazy { getRandomIMEI() }
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
         HookUtils.log("$TAG: 开始隐藏模拟器特征")
@@ -101,61 +169,57 @@ class EmulatorHooks : HookEntry.HookHandler {
      */
     private fun hookBuildProperties() {
         try {
-            // 修改 Build 类静态字段
-            XposedHelpers.setStaticObjectField(Build::class.java, "BRAND", DEVICE_BRAND)
-            XposedHelpers.setStaticObjectField(Build::class.java, "MODEL", DEVICE_MODEL)
-            XposedHelpers.setStaticObjectField(Build::class.java, "DEVICE", DEVICE_DEVICE)
-            XposedHelpers.setStaticObjectField(Build::class.java, "PRODUCT", DEVICE_PRODUCT)
-            XposedHelpers.setStaticObjectField(Build::class.java, "BOARD", DEVICE_BOARD)
-            XposedHelpers.setStaticObjectField(Build::class.java, "HARDWARE", DEVICE_HARDWARE)
-            XposedHelpers.setStaticObjectField(Build::class.java, "MANUFACTURER", DEVICE_MANUFACTURER)
-            XposedHelpers.setStaticObjectField(Build::class.java, "FINGERPRINT", DEVICE_FINGERPRINT)
-            XposedHelpers.setStaticObjectField(Build::class.java, "DISPLAY", DEVICE_DISPLAY)
-            XposedHelpers.setStaticObjectField(Build::class.java, "TYPE", DEVICE_BUILD_TYPE)
-            XposedHelpers.setStaticObjectField(Build::class.java, "TAGS", DEVICE_BUILD_TAGS)
-            XposedHelpers.setStaticObjectField(Build::class.java, "SERIAL", DEVICE_SERIAL)
+            XposedHelpers.setStaticObjectField(Build::class.java, "BRAND", getDeviceBrand())
+            XposedHelpers.setStaticObjectField(Build::class.java, "MODEL", getDeviceModel())
+            XposedHelpers.setStaticObjectField(Build::class.java, "DEVICE", getDeviceDevice())
+            XposedHelpers.setStaticObjectField(Build::class.java, "PRODUCT", getDeviceProduct())
+            XposedHelpers.setStaticObjectField(Build::class.java, "BOARD", getDeviceBoard())
+            XposedHelpers.setStaticObjectField(Build::class.java, "HARDWARE", getDeviceHardware())
+            XposedHelpers.setStaticObjectField(Build::class.java, "MANUFACTURER", getDeviceManufacturer())
+            XposedHelpers.setStaticObjectField(Build::class.java, "FINGERPRINT", getDeviceFingerprint())
+            XposedHelpers.setStaticObjectField(Build::class.java, "DISPLAY", getDeviceDisplay())
+            XposedHelpers.setStaticObjectField(Build::class.java, "TYPE", "user")
+            XposedHelpers.setStaticObjectField(Build::class.java, "TAGS", "release-keys")
+            XposedHelpers.setStaticObjectField(Build::class.java, "SERIAL", getRandomSerial())
             XposedHelpers.setStaticObjectField(Build::class.java, "HOST", "SRPXG000000")
             XposedHelpers.setStaticObjectField(Build::class.java, "USER", "dpi")
-            XposedHelpers.setStaticObjectField(Build::class.java, "ID", "UP1A.231005.007")
-            XposedHelpers.setStaticObjectField(Build::class.java, "BOOTLOADER", "e3q-1.0-123456")
-            XposedHelpers.setStaticObjectField(Build::class.java, "RADIO", "G998BXXU3AXK4")
+            XposedHelpers.setStaticObjectField(Build::class.java, "ID", getDeviceDisplay())
+            XposedHelpers.setStaticObjectField(Build::class.java, "BOOTLOADER", "${getDeviceDevice()}-1.0-123456")
+            XposedHelpers.setStaticObjectField(Build::class.java, "RADIO", getDeviceIncremental())
 
-            // 修改 Build.VERSION 字段
             val versionClass = Build.VERSION::class.java
-            XposedHelpers.setStaticObjectField(versionClass, "RELEASE", "14")
-            XposedHelpers.setStaticIntField(versionClass, "SDK_INT", 34)
-            XposedHelpers.setStaticObjectField(versionClass, "INCREMENTAL", "S928BXXU3AXK4")
-            XposedHelpers.setStaticObjectField(versionClass, "RELEASE_OR_CODENAME", "14")
-            XposedHelpers.setStaticObjectField(versionClass, "SECURITY_PATCH", "2024-11-01")
+            XposedHelpers.setStaticObjectField(versionClass, "RELEASE", getDeviceRelease())
+            XposedHelpers.setStaticIntField(versionClass, "SDK_INT", getDeviceSdkInt())
+            XposedHelpers.setStaticObjectField(versionClass, "INCREMENTAL", getDeviceIncremental())
+            XposedHelpers.setStaticObjectField(versionClass, "RELEASE_OR_CODENAME", getDeviceRelease())
+            XposedHelpers.setStaticObjectField(versionClass, "SECURITY_PATCH", getDeviceSecurityPatch())
 
-            // Hook Build.getString() - 拦截反射读取
             XposedHelpers.findAndHookMethod(
                 Build::class.java, "getString", String::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val key = param.args[0] as? String ?: return
                         param.result = when (key) {
-                            "ro.product.brand" -> DEVICE_BRAND
-                            "ro.product.model" -> DEVICE_MODEL
-                            "ro.product.device" -> DEVICE_DEVICE
-                            "ro.product.board" -> DEVICE_BOARD
-                            "ro.product.name" -> DEVICE_PRODUCT
-                            "ro.hardware" -> DEVICE_HARDWARE
-                            "ro.build.fingerprint" -> DEVICE_FINGERPRINT
-                            "ro.serialno" -> DEVICE_SERIAL
+                            "ro.product.brand" -> getDeviceBrand()
+                            "ro.product.model" -> getDeviceModel()
+                            "ro.product.device" -> getDeviceDevice()
+                            "ro.product.board" -> getDeviceBoard()
+                            "ro.product.name" -> getDeviceProduct()
+                            "ro.hardware" -> getDeviceHardware()
+                            "ro.build.fingerprint" -> getDeviceFingerprint()
+                            "ro.serialno" -> getRandomSerial()
                             else -> param.result
                         }
                     }
                 }
             )
 
-            // Hook Build.getSerial()
             try {
                 XposedHelpers.findAndHookMethod(
                     Build::class.java, "getSerial",
                     object : XC_MethodHook() {
                         override fun afterHookedMethod(param: MethodHookParam) {
-                            param.result = DEVICE_SERIAL
+                            param.result = getRandomSerial()
                         }
                     }
                 )
@@ -174,20 +238,19 @@ class EmulatorHooks : HookEntry.HookHandler {
         try {
             val propsClass = XposedHelpers.findClass("android.os.SystemProperties", null)
 
-            // 属性映射表
             val propOverrides = mapOf(
-                "ro.hardware" to DEVICE_HARDWARE,
-                "ro.boot.hardware" to DEVICE_HARDWARE,
-                "ro.product.model" to DEVICE_MODEL,
-                "ro.product.device" to DEVICE_DEVICE,
-                "ro.product.board" to DEVICE_BOARD,
-                "ro.product.brand" to DEVICE_BRAND,
-                "ro.product.name" to DEVICE_PRODUCT,
-                "ro.product.manufacturer" to DEVICE_MANUFACTURER,
-                "ro.build.fingerprint" to DEVICE_FINGERPRINT,
-                "ro.build.display.id" to DEVICE_DISPLAY,
-                "ro.build.type" to DEVICE_BUILD_TYPE,
-                "ro.build.tags" to DEVICE_BUILD_TAGS,
+                "ro.hardware" to getDeviceHardware(),
+                "ro.boot.hardware" to getDeviceHardware(),
+                "ro.product.model" to getDeviceModel(),
+                "ro.product.device" to getDeviceDevice(),
+                "ro.product.board" to getDeviceBoard(),
+                "ro.product.brand" to getDeviceBrand(),
+                "ro.product.name" to getDeviceProduct(),
+                "ro.product.manufacturer" to getDeviceManufacturer(),
+                "ro.build.fingerprint" to getDeviceFingerprint(),
+                "ro.build.display.id" to getDeviceDisplay(),
+                "ro.build.type" to "user",
+                "ro.build.tags" to "release-keys",
                 "ro.build.characteristics" to "default",
                 "ro.boot.qemu" to "0",
                 "ro.kernel.qemu" to "0",
@@ -195,9 +258,9 @@ class EmulatorHooks : HookEntry.HookHandler {
                 "ro.secure" to "1",
                 "ro.boot.verifiedbootstate" to "green",
                 "ro.boot.flash.locked" to "1",
-                "gsm.version.baseband" to "G998BXXU3AXK4",
-                "ro.serialno" to DEVICE_SERIAL,
-                "ro.boot.serialno" to DEVICE_SERIAL,
+                "gsm.version.baseband" to getDeviceIncremental(),
+                "ro.serialno" to getRandomSerial(),
+                "ro.boot.serialno" to getRandomSerial(),
                 "net.dns1" to "8.8.8.8",
                 "net.dns2" to "8.8.4.4",
                 "ro.setupwizard.mode" to "OPTIONAL",
@@ -319,8 +382,8 @@ class EmulatorHooks : HookEntry.HookHandler {
                         val key = param.args[0] as? String ?: return
                         when (key) {
                             "ro.kernel.qemu" -> param.result = "0"
-                            "ro.hardware" -> param.result = DEVICE_HARDWARE
-                            "ro.product.model" -> param.result = DEVICE_MODEL
+                            "ro.hardware" -> param.result = getDeviceHardware()
+                            "ro.product.model" -> param.result = getDeviceModel()
                         }
                     }
                 }
@@ -506,13 +569,12 @@ class EmulatorHooks : HookEntry.HookHandler {
                 } catch (_: Exception) {}
             }
 
-            // IMSI
             try {
                 XposedHelpers.findAndHookMethod(
                     tmClass, "getSubscriberId",
                     object : XC_MethodHook() {
                         override fun afterHookedMethod(param: MethodHookParam) {
-                            param.result = "460001234567890"
+                            param.result = getRandomIMSI()
                         }
                     }
                 )
@@ -737,13 +799,5 @@ class EmulatorHooks : HookEntry.HookHandler {
         }
     }
 
-    /**
-     * 生成随机但有效的 Android ID
-     */
-    private fun generateAndroidId(): String {
-        val chars = "0123456789abcdef"
-        return buildString(16) {
-            repeat(16) { append(chars.random()) }
-        }
-    }
+    private fun generateAndroidId(): String = getRandomAndroidID()
 }
