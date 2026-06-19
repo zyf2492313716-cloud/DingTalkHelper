@@ -186,4 +186,57 @@ object Constants {
     val ORIGINOS_MANUFACTURERS = listOf("vivo", "iqoo")
     val ONEUI_MANUFACTURERS = listOf("samsung")
     val HARMONYOS_MANUFACTURERS = listOf("huawei", "honor")
+
+    // ==================== 模拟器检测相关 ====================
+    // 模拟器传感器特征关键词
+    val EMULATOR_SENSOR_KEYWORDS = setOf(
+        "goldfish", "ranchu", "emulator", "qemu", "vbox",
+        "genymotion", "nox", "bluestacks", "ldplayer"
+    )
+
+    // 模拟器文件特征路径
+    val EMULATOR_FILES = listOf(
+        "/dev/qemu_pipe",
+        "/dev/qemud",
+        "/dev/socket/qemud",
+        "/dev/socket/genyd",
+        "/dev/socket/baseband_genyd",
+        "/sys/qemu_trace",
+        "/system/bin/qemu-props",
+        "/dev/avf_guest",
+        "/system/etc/init.goldfish.rc",
+        "/system/lib/libc_malloc_debug_qemu.so",
+        "/system/lib64/libc_malloc_debug_qemu.so"
+    )
+
+    // 模拟器 Build 特征值
+    val EMULATOR_HARDWARE_VALUES = listOf("goldfish", "ranchu", "vbox86")
+    val EMULATOR_BRAND_VALUES = listOf("generic", "generic_x86", "generic_x86_64")
+    val EMULATOR_DEVICE_VALUES = listOf("generic", "vbox86p", "generic_x86", "generic_x86_64")
+    val EMULATOR_MODEL_KEYWORDS = listOf("sdk", "google_sdk", "android sdk", "emulator")
+    val EMULATOR_FINGERPRINT_KEYWORDS = listOf("generic", "vbox", "nox", "test-keys")
+    val EMULATOR_BUILD_TAGS = listOf("test-keys")
+    val EMULATOR_BUILD_TYPES = listOf("userdebug", "eng")
+
+    // 模拟器系统属性
+    val EMULATOR_SYSTEM_PROPERTIES = mapOf(
+        "ro.kernel.qemu" to "1",
+        "ro.boot.qemu" to "1",
+        "ro.hardware" to "ranchu",
+        "ro.product.model" to "sdk",
+        "ro.product.device" to "generic",
+        "ro.debuggable" to "1"
+    )
+
+    // 模拟器 TelephonyManager 默认值
+    const val EMULATOR_IMEI_DEFAULT = "000000000000000"
+    const val EMULATOR_IMSI_DEFAULT = "310260000000000"
+    const val EMULATOR_PHONE_NUMBER_DEFAULT = "15555215554"
+    const val EMULATOR_OPERATOR_NAME_DEFAULT = "Android"
+    const val EMULATOR_OPERATOR_CODE_DEFAULT = "310260"
+
+    // 模拟器网络特征
+    const val EMULATOR_IP_DEFAULT = "10.0.2.15"
+    const val EMULATOR_DNS_DEFAULT = "10.0.2.3"
+    const val EMULATOR_GATEWAY_DEFAULT = "10.0.2.2"
 }
