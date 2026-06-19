@@ -82,7 +82,14 @@ class DeepHidingHooks : HookEntry.HookHandler {
             "/proc/self/cmdline",
             "/proc/self/mountinfo",
             "/proc/thread-self/maps",
-            "/proc/thread-self/status"
+            "/proc/thread-self/status",
+            // 新增：更多 /proc 路径
+            "/proc/self/exe",
+            "/proc/self/cgroup",
+            "/proc/self/oom_score",
+            "/proc/self/oom_adj",
+            "/proc/self/attr/current",
+            "/proc/self/loginuid"
         )
 
         // Magisk 相关路径关键词（用于文件路径检查）

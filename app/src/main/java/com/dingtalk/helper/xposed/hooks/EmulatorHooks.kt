@@ -309,6 +309,8 @@ class EmulatorHooks : HookEntry.HookHandler {
             hookHardwareDetection()
             hookSettingsDetection()
             hookNativeProperties()
+            // 新增：网络接口检测绕过
+            hookNetworkInterfaceDetection(lpparam)
 
             HookUtils.log("$TAG: 模拟器特征隐藏完成")
         } catch (e: Exception) {
@@ -928,6 +930,84 @@ class EmulatorHooks : HookEntry.HookHandler {
                 networkCountryIso = "cn",
                 simCountryIso = "cn"
             )
+        }
+    }
+
+    /**
+     * Hook NetworkInterface.getNetworkInterfaces()
+     * 模拟器通常有 eth0, sit0, tun0, tap0 等特征网卡
+     * 真实设备通常只有 wlan0, rmnet0 等
+     */
+    private fun hookNetworkInterfaceDetection(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val niClass = java.net.NetworkInterface::class.java
+
+            // 模拟器特征网卡名称
+            val emulatorInterfacePrefixes = setOf(
+                "eth", "sit", "tun", "tap", "vbox", "virbr",
+                "docker", "br-", "veth"
+            )
+
+            // Hook getNetworkInterfaces()
+            XposedHelpers.findAndHookMethod(
+                niClass, "getNetworkInterfaces",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (param.hasThrowable()) return
+                        val interfaces = param.result as? java.util.Enumeration<*> ?: return
+
+                        val filteredInterfaces = mutableListOf<java.net.NetworkInterface>()
+                        while (interfaces.hasMoreElements()) {
+                            val ni = interfaces.nextElement() as? java.net.NetworkInterface ?: continue
+                            val name = ni.name.lowercase()
+
+                            // 过滤模拟器特征网卡
+                            val isEmulatorInterface = emulatorInterfacePrefixes.any { name.startsWith(it) }
+                            if (!isEmulatorInterface) {
+                                filteredInterfaces.add(ni)
+                            }
+                        }
+
+                        // 返回过滤后的枚举
+                        param.result = java.util.Collections.enumeration(filteredInterfaces)
+                    }
+                }
+            )
+
+            // Hook NetworkInterface.getName() - 备份
+            XposedHelpers.findAndHookMethod(
+                niClass, "getName",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val name = param.result as? String ?: return
+                        val nameLower = name.lowercase()
+
+                        // 如果是模拟器特征网卡，返回 "wlan0"
+                        if (emulatorInterfacePrefixes.any { nameLower.startsWith(it) }) {
+                            param.result = "wlan0"
+                        }
+                    }
+                }
+            )
+
+            // Hook NetworkInterface.getDisplayName() - 备份
+            XposedHelpers.findAndHookMethod(
+                niClass, "getDisplayName",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val name = param.result as? String ?: return
+                        val nameLower = name.lowercase()
+
+                        if (emulatorInterfacePrefixes.any { nameLower.startsWith(it) }) {
+                            param.result = "wlan0"
+                        }
+                    }
+                }
+            )
+
+            HookUtils.logDebug("$TAG: NetworkInterface 检测已 Hook")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: NetworkInterface Hook 失败: ${e.message}")
         }
     }
 }
