@@ -46,6 +46,9 @@ class SafeguardHooks : HookEntry.HookHandler {
             "com.alibaba.wireless.security",
             "com.taobao.wireless.security"
         )
+
+        // 已 hook 的 LocationInterface 实现类
+        private val hookedLocationClasses = ConcurrentHashMap.newKeySet<String>()
     }
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -56,7 +59,9 @@ class SafeguardHooks : HookEntry.HookHandler {
         hookSafeGuardMain(lpparam)
         hookLocationInterface(lpparam)
         hookSecurityBodyComponent(lpparam)
+        hookSecureSignatureComponent(lpparam)
         hookAntiCheatingHelper(lpparam)
+        hookSafeGuardDispatcher(lpparam)
 
         HookUtils.log("$TAG: SafeGuard Hook 注入完成")
     }
@@ -232,6 +237,8 @@ class SafeguardHooks : HookEntry.HookHandler {
      * - getSimulatedBySoftware() → 返回 0 表示非软件模拟
      * - getProducedByAccessory() → 返回 0 表示非配件产生
      * - getLatitude/getLongitude/getAltitude 等
+     *
+     * 由于 LocationInterface 是抽象类，需要找到具体实现类进行 Hook
      */
     private fun hookLocationInterface(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
@@ -240,9 +247,30 @@ class SafeguardHooks : HookEntry.HookHandler {
                 lpparam.classLoader
             )
 
-            // Hook getSimulatedBySoftware - 关键！检测是否软件模拟
+            // Hook 抽象类的默认方法（如果有）
+            hookLocationInterfaceMethods(locationInterfaceClass)
+
+            // 搜索 LocationInterface 的具体实现类
+            hookLocationInterfaceImplementations(lpparam, locationInterfaceClass)
+
+            HookUtils.log("$TAG: LocationInterface Hook 完成")
+        } catch (e: ClassNotFoundException) {
+            HookUtils.logDebug("$TAG: LocationInterface 类未找到 (可能混淆或不存在)")
+            // 尝试搜索可能的混淆类名
+            hookLocationInterfaceBySearch(lpparam)
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: LocationInterface Hook 失败: ${e.message}")
+        }
+    }
+
+    /**
+     * Hook LocationInterface 的方法
+     */
+    private fun hookLocationInterfaceMethods(clazz: Class<*>) {
+        // Hook getSimulatedBySoftware
+        try {
             XposedHelpers.findAndHookMethod(
-                locationInterfaceClass,
+                clazz,
                 "getSimulatedBySoftware",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
@@ -251,10 +279,12 @@ class SafeguardHooks : HookEntry.HookHandler {
                     }
                 }
             )
+        } catch (_: Exception) {}
 
-            // Hook getProducedByAccessory - 检测是否配件产生
+        // Hook getProducedByAccessory
+        try {
             XposedHelpers.findAndHookMethod(
-                locationInterfaceClass,
+                clazz,
                 "getProducedByAccessory",
                 object : XC_MethodReplacement() {
                     override fun replaceHookedMethod(param: MethodHookParam): Any {
@@ -262,12 +292,251 @@ class SafeguardHooks : HookEntry.HookHandler {
                     }
                 }
             )
+        } catch (_: Exception) {}
 
-            HookUtils.log("$TAG: LocationInterface Hook 完成")
-        } catch (e: ClassNotFoundException) {
-            HookUtils.logDebug("$TAG: LocationInterface 类未找到 (可能混淆或不存在)")
+        // Hook getLatitude
+        try {
+            XposedHelpers.findAndHookMethod(
+                clazz,
+                "getLatitude",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!ConfigManager.isFakeLocationEnabled()) return
+                        try {
+                            val fakeData = FakeDataProvider.getCurrentFakeLocation()
+                            param.result = fakeData.latitude
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+        } catch (_: Exception) {}
+
+        // Hook getLongitude
+        try {
+            XposedHelpers.findAndHookMethod(
+                clazz,
+                "getLongitude",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!ConfigManager.isFakeLocationEnabled()) return
+                        try {
+                            val fakeData = FakeDataProvider.getCurrentFakeLocation()
+                            param.result = fakeData.longitude
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+        } catch (_: Exception) {}
+
+        // Hook getAltitude
+        try {
+            XposedHelpers.findAndHookMethod(
+                clazz,
+                "getAltitude",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!ConfigManager.isFakeLocationEnabled()) return
+                        try {
+                            val fakeData = FakeDataProvider.getCurrentFakeLocation()
+                            param.result = fakeData.altitude
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+        } catch (_: Exception) {}
+
+        // Hook getSpeed
+        try {
+            XposedHelpers.findAndHookMethod(
+                clazz,
+                "getSpeed",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!ConfigManager.isFakeLocationEnabled()) return
+                        try {
+                            val fakeData = FakeDataProvider.getCurrentFakeLocation()
+                            param.result = fakeData.speed
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * 搜索并 Hook LocationInterface 的具体实现类
+     */
+    private fun hookLocationInterfaceImplementations(
+        lpparam: XC_LoadPackage.LoadPackageParam,
+        locationInterfaceClass: Class<*>
+    ) {
+        try {
+            // 尝试找到 SafeGuardInterface.CppProxy 类
+            val cppProxyClass = XposedHelpers.findClass(
+                "com.alibaba.dingtalk.safeguard.SafeGuardInterface\$CppProxy",
+                lpparam.classLoader
+            )
+
+            // Hook setLocationManager - 拦截传入的 LocationInterface 对象
+            try {
+                XposedHelpers.findAndHookMethod(
+                    cppProxyClass,
+                    "setLocationManager",
+                    locationInterfaceClass,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            HookUtils.logDebug("$TAG: CppProxy.setLocationManager 被调用")
+                            // 注意：这里不能替换 LocationInterface 对象，因为 native 层需要它
+                            // 但我们可以 hook 传入的对象的方法
+                            val locationManager = param.args[0] ?: return
+                            hookLocationInterfaceInstance(locationManager.javaClass)
+                        }
+                    }
+                )
+                HookUtils.log("$TAG: CppProxy.setLocationManager Hook 完成")
+            } catch (e: Exception) {
+                HookUtils.logDebug("$TAG: CppProxy.setLocationManager Hook 失败: ${e.message}")
+            }
+
+            // Hook setLocationManagerExtra
+            try {
+                XposedHelpers.findAndHookMethod(
+                    cppProxyClass,
+                    "setLocationManagerExtra",
+                    locationInterfaceClass,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            HookUtils.logDebug("$TAG: CppProxy.setLocationManagerExtra 被调用")
+                            val locationManager = param.args[0] ?: return
+                            hookLocationInterfaceInstance(locationManager.javaClass)
+                        }
+                    }
+                )
+                HookUtils.log("$TAG: CppProxy.setLocationManagerExtra Hook 完成")
+            } catch (e: Exception) {
+                HookUtils.logDebug("$TAG: CppProxy.setLocationManagerExtra Hook 失败: ${e.message}")
+            }
         } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: LocationInterface Hook 失败: ${e.message}")
+            HookUtils.logDebug("$TAG: CppProxy 搜索失败: ${e.message}")
+        }
+    }
+
+    /**
+     * Hook LocationInterface 的具体实例类
+     */
+    private fun hookLocationInterfaceInstance(clazz: Class<*>) {
+        try {
+            // 检查是否已经 hook 过
+            val className = clazz.name
+            if (className in hookedLocationClasses) return
+            hookedLocationClasses.add(className)
+
+            HookUtils.log("$TAG: 发现 LocationInterface 实现类: $className")
+
+            // Hook getSimulatedBySoftware
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clazz,
+                    "getSimulatedBySoftware",
+                    object : XC_MethodReplacement() {
+                        override fun replaceHookedMethod(param: MethodHookParam): Any {
+                            HookUtils.logDebug("$TAG: $className.getSimulatedBySoftware -> 0")
+                            return 0
+                        }
+                    }
+                )
+            } catch (_: Exception) {}
+
+            // Hook getProducedByAccessory
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clazz,
+                    "getProducedByAccessory",
+                    object : XC_MethodReplacement() {
+                        override fun replaceHookedMethod(param: MethodHookParam): Any {
+                            return 0
+                        }
+                    }
+                )
+            } catch (_: Exception) {}
+
+            // Hook getLatitude
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clazz,
+                    "getLatitude",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!ConfigManager.isFakeLocationEnabled()) return
+                            try {
+                                val fakeData = FakeDataProvider.getCurrentFakeLocation()
+                                param.result = fakeData.latitude
+                            } catch (_: Exception) {}
+                        }
+                    }
+                )
+            } catch (_: Exception) {}
+
+            // Hook getLongitude
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clazz,
+                    "getLongitude",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!ConfigManager.isFakeLocationEnabled()) return
+                            try {
+                                val fakeData = FakeDataProvider.getCurrentFakeLocation()
+                                param.result = fakeData.longitude
+                            } catch (_: Exception) {}
+                        }
+                    }
+                )
+            } catch (_: Exception) {}
+
+            HookUtils.log("$TAG: LocationInterface 实现类 Hook 完成: $className")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: LocationInterface 实现类 Hook 失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 当 LocationInterface 类名被混淆时，通过方法签名搜索
+     */
+    private fun hookLocationInterfaceBySearch(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            HookUtils.log("$TAG: 尝试通过方法签名搜索 LocationInterface...")
+
+            // 搜索包含 getSimulatedBySoftware 方法的类
+            val classesToScan = listOf(
+                "com.alibaba.dingtalk.safeguard.LocationInterface",
+                "com.alibaba.dingtalk.safeguard.a",
+                "com.alibaba.dingtalk.safeguard.b",
+                "com.alibaba.dingtalk.safeguard.c"
+            )
+
+            for (className in classesToScan) {
+                try {
+                    val clazz = XposedHelpers.findClass(className, lpparam.classLoader)
+
+                    // 检查是否有 getSimulatedBySoftware 方法
+                    val hasMethod = clazz.declaredMethods.any {
+                        it.name == "getSimulatedBySoftware" && it.parameterTypes.isEmpty()
+                    }
+
+                    if (hasMethod) {
+                        HookUtils.log("$TAG: 找到 LocationInterface 类: $className")
+                        hookLocationInterfaceMethods(clazz)
+                        return
+                    }
+                } catch (_: ClassNotFoundException) {
+                    continue
+                }
+            }
+
+            HookUtils.logDebug("$TAG: 未找到 LocationInterface 类")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: LocationInterface 搜索失败: ${e.message}")
         }
     }
 
@@ -357,6 +626,52 @@ class SafeguardHooks : HookEntry.HookHandler {
     }
 
     /**
+     * Hook ISecureSignatureComponent - 签名生成组件
+     *
+     * signRequest(appKey, requestType, params) 生成 ddSig
+     * appKey = "2049587" (钉钉), requestType = 19 (打卡)
+     */
+    private fun hookSecureSignatureComponent(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val classNames = listOf(
+            "com.alibaba.wireless.security.open.securesignature.ISecureSignatureComponent",
+            "com.taobao.wireless.security.sdk.securesignature.ISecureSignatureComponent"
+        )
+
+        for (className in classNames) {
+            try {
+                val clazz = XposedHelpers.findClass(className, lpparam.classLoader)
+
+                // Hook signRequest - 记录签名请求
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        clazz,
+                        "signRequest",
+                        String::class.java,  // appKey
+                        Int::class.javaPrimitiveType,  // requestType
+                        java.util.HashMap::class.java,  // params
+                        object : XC_MethodHook() {
+                            override fun beforeHookedMethod(param: MethodHookParam) {
+                                try {
+                                    val appKey = param.args[0] as? String ?: ""
+                                    val requestType = param.args[1] as? Int ?: 0
+                                    HookUtils.logDebug("$TAG: signRequest(appKey=$appKey, requestType=$requestType)")
+                                } catch (_: Exception) {}
+                            }
+                        }
+                    )
+                    HookUtils.log("$TAG: ISecureSignatureComponent.signRequest Hook 完成 ($className)")
+                } catch (e: Exception) {
+                    HookUtils.logDebug("$TAG: signRequest Hook 失败: ${e.message}")
+                }
+
+                break
+            } catch (_: ClassNotFoundException) {
+                continue
+            }
+        }
+    }
+
+    /**
      * Hook AntiCheatingHelper (nr0 类)
      *
      * nr0.h() 方法直接调用 locationD.isFromMockProvider() 并放入 JSON:
@@ -386,13 +701,40 @@ class SafeguardHooks : HookEntry.HookHandler {
                             override fun afterHookedMethod(param: MethodHookParam) {
                                 try {
                                     val jsonObject = param.result as? org.json.JSONObject ?: return
-                                    if (jsonObject.has("isMock")) {
-                                        val wasMock = jsonObject.getBoolean("isMock")
-                                        if (wasMock) {
-                                            jsonObject.put("isMock", false)
-                                            param.result = jsonObject
-                                            HookUtils.logDebug("$TAG: nr0.h() isMock: true -> false")
+
+                                    // 修复所有可能的检测字段
+                                    val fieldsToFix = listOf(
+                                        "isMock", "mock", "is_mock",
+                                        "isSimulated", "simulated",
+                                        "isFromMockProvider"
+                                    )
+                                    var modified = false
+                                    for (field in fieldsToFix) {
+                                        if (jsonObject.has(field) && jsonObject.getBoolean(field)) {
+                                            jsonObject.put(field, false)
+                                            modified = true
+                                            HookUtils.logDebug("$TAG: nr0.h() $field: true -> false")
                                         }
+                                    }
+
+                                    // 修复 riskScore/riskLevel
+                                    if (jsonObject.has("riskScore")) {
+                                        val score = jsonObject.optInt("riskScore", 0)
+                                        if (score > 5) {
+                                            jsonObject.put("riskScore", 3)
+                                            modified = true
+                                        }
+                                    }
+                                    if (jsonObject.has("riskLevel")) {
+                                        val level = jsonObject.optString("riskLevel", "")
+                                        if (level == "high" || level == "danger") {
+                                            jsonObject.put("riskLevel", "low")
+                                            modified = true
+                                        }
+                                    }
+
+                                    if (modified) {
+                                        param.result = jsonObject
                                     }
                                 } catch (e: Exception) {
                                     HookUtils.logDebug("$TAG: nr0.h() 拦截失败: ${e.message}")
@@ -406,8 +748,7 @@ class SafeguardHooks : HookEntry.HookHandler {
                 }
 
                 // 方法 j(Location) - 调用 SafeGuardMain.setLocation + getSecurityDataEx
-                // setLocation 已经在上面 hook 了，所以这里不需要重复
-                // 但可以 hook 方法 j 来记录调用
+                // 替换位置参数，确保 native 层读取到伪造位置
                 try {
                     XposedHelpers.findAndHookMethod(
                         clazz,
@@ -417,16 +758,86 @@ class SafeguardHooks : HookEntry.HookHandler {
                             override fun beforeHookedMethod(param: MethodHookParam) {
                                 if (!ConfigManager.isFakeLocationEnabled()) return
                                 try {
-                                    val location = param.args[0] as? Location ?: return
-                                    HookUtils.logDebug("$TAG: nr0.j() 被调用: " +
-                                        "(${location.latitude}, ${location.longitude})")
-                                } catch (_: Exception) {}
+                                    val originalLocation = param.args[0] as? Location ?: return
+                                    val fakeLocation = createFakeLocationForSafeguard()
+                                    param.args[0] = fakeLocation
+                                    HookUtils.logDebug("$TAG: nr0.j() 位置已替换: " +
+                                        "(${originalLocation.latitude}, ${originalLocation.longitude}) -> " +
+                                        "(${fakeLocation.latitude}, ${fakeLocation.longitude})")
+                                } catch (e: Exception) {
+                                    HookUtils.logDebug("$TAG: nr0.j() 拦截失败: ${e.message}")
+                                }
                             }
                         }
                     )
                     HookUtils.log("$TAG: nr0.j() Hook 完成")
                 } catch (e: Exception) {
                     HookUtils.logDebug("$TAG: nr0.j() Hook 失败: ${e.message}")
+                }
+
+                // 方法 l(Context, Location) - 调用 ISecurityBodyComponent.enterRiskScene
+                // 替换位置参数
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        clazz,
+                        "l",
+                        android.content.Context::class.java,
+                        Location::class.java,
+                        object : XC_MethodHook() {
+                            override fun beforeHookedMethod(param: MethodHookParam) {
+                                if (!ConfigManager.isFakeLocationEnabled()) return
+                                try {
+                                    val location = param.args[1] as? Location ?: return
+                                    val fakeLocation = createFakeLocationForSafeguard()
+                                    param.args[1] = fakeLocation
+                                    HookUtils.logDebug("$TAG: nr0.l() 位置已替换")
+                                } catch (e: Exception) {
+                                    HookUtils.logDebug("$TAG: nr0.l() 拦截失败: ${e.message}")
+                                }
+                            }
+                        }
+                    )
+                    HookUtils.log("$TAG: nr0.l() Hook 完成")
+                } catch (e: Exception) {
+                    HookUtils.logDebug("$TAG: nr0.l() Hook 失败: ${e.message}")
+                }
+
+                break
+            } catch (_: ClassNotFoundException) {
+                continue
+            }
+        }
+    }
+
+    /**
+     * Hook SafeGuardDispatcher - 数据上报调度器
+     *
+     * 阻止或修改安全数据上报到服务器
+     */
+    private fun hookSafeGuardDispatcher(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val classNames = listOf(
+            "com.alibaba.dingtalk.safeguard.SafeGuardDispatcher",
+            "com.alibaba.dingtalk.safeguard.dispatcher.SafeGuardDispatcher"
+        )
+
+        for (className in classNames) {
+            try {
+                val clazz = XposedHelpers.findClass(className, lpparam.classLoader)
+
+                // Hook sendBasicInfo - 基础数据上报
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        clazz,
+                        "sendBasicInfo",
+                        object : XC_MethodHook() {
+                            override fun beforeHookedMethod(param: MethodHookParam) {
+                                HookUtils.logDebug("$TAG: SafeGuardDispatcher.sendBasicInfo 被调用")
+                            }
+                        }
+                    )
+                    HookUtils.log("$TAG: SafeGuardDispatcher.sendBasicInfo Hook 完成 ($className)")
+                } catch (e: Exception) {
+                    HookUtils.logDebug("$TAG: sendBasicInfo Hook 失败: ${e.message}")
                 }
 
                 break
