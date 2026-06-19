@@ -40,7 +40,17 @@ class AntiTraceHooks : HookEntry.HookHandler {
             "/proc/self/cmdline",
             "/proc/self/mountinfo",
             "/proc/thread-self/maps",
-            "/proc/thread-self/status"
+            "/proc/thread-self/status",
+            // 新增：系统信息文件（模拟器检测常用）
+            "/proc/cpuinfo",
+            "/proc/meminfo",
+            "/proc/version",
+            "/proc/stat",
+            "/proc/uptime",
+            "/proc/diskstats",
+            "/proc/net/tcp",
+            "/proc/net/wifi",
+            "/proc/tty/drivers"
         )
 
         // 敏感命令关键词（Runtime.exec / ProcessBuilder）
@@ -53,7 +63,21 @@ class AntiTraceHooks : HookEntry.HookHandler {
             "cat /proc/self/mountinfo",
             "cat /proc/self/task/",
             "ls /data/adb/",
-            "ls /data/misc/"
+            "ls /data/misc/",
+            // 新增：系统信息命令
+            "cat /proc/cpuinfo",
+            "cat /proc/meminfo",
+            "cat /proc/version",
+            "cat /proc/stat",
+            "cat /proc/uptime",
+            "getprop",
+            "getprop ro.hardware",
+            "getprop ro.product.model",
+            "getprop ro.kernel.qemu",
+            "getprop ro.debuggable",
+            "dumpsys",
+            "pm list packages",
+            "pm list installed"
         )
 
         // /proc/maps 行级过滤关键词
@@ -62,7 +86,24 @@ class AntiTraceHooks : HookEntry.HookHandler {
             "edxposed", "magisk", "zygisk",
             "com.dingtalk.helper", "hidemyapplist",
             "liblsposed_art.so", "libmemudisk.so",
-            "libxposed_art.so", "libsandhook.so"
+            "libxposed_art.so", "libsandhook.so",
+            // 新增：更多 Hook 框架特征
+            "libwhale.so", "libtiran.so", "liblspd.so", "libriru.so",
+            "frida", "gadget", "substrate",
+            "libdexposed", "libnativehook"
+        )
+
+        // /proc/cpuinfo 中的模拟器特征
+        private val EMULATOR_CPU_KEYWORDS = setOf(
+            "goldfish", "ranchu", "emulator", "qemu",
+            "vbox", "genymotion", "intel", "amd",
+            "x86", "x86_64", "i686"
+        )
+
+        // /proc/version 中的模拟器特征
+        private val EMULATOR_VERSION_KEYWORDS = setOf(
+            "goldfish", "ranchu", "emulator", "qemu",
+            "vbox", "genymotion", "android-x86"
         )
     }
 
@@ -76,6 +117,9 @@ class AntiTraceHooks : HookEntry.HookHandler {
             hookProcessBuilderForProc(lpparam)
             hookBufferedReaderForProc(lpparam)
             hookFileInputStreamForProc(lpparam)
+            // 新增：拦截系统信息文件读取
+            hookProcSystemInfo(lpparam)
+            hookGetpropCommand(lpparam)
 
             HookUtils.log("$TAG: 反追踪 Hook 注入完成")
         } catch (e: Exception) {
@@ -410,5 +454,149 @@ class AntiTraceHooks : HookEntry.HookHandler {
     private fun isProcLineSensitive(line: String): Boolean {
         val lineLower = line.lowercase()
         return PROC_LINE_KEYWORDS.any { lineLower.contains(it) }
+    }
+
+    // ==================== 5. 系统信息文件拦截 ====================
+
+    /**
+     * 拦截 /proc/cpuinfo, /proc/meminfo, /proc/version 等系统信息文件读取
+     * 这些文件可以被用来检测模拟器
+     */
+    private fun hookProcSystemInfo(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val fisClass = FileInputStream::class.java
+
+            // Hook FileInputStream(String) - 拦截系统信息文件
+            XposedHelpers.findAndHookConstructor(
+                fisClass, String::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val path = param.args[0] as? String ?: return
+                        if (isSystemInfoPath(path)) {
+                            // 返回空文件而不是抛异常，避免应用崩溃
+                            param.args[0] = "/dev/null"
+                            HookUtils.logDebug("$TAG: 重定向系统信息文件: $path -> /dev/null")
+                        }
+                    }
+                }
+            )
+
+            // Hook FileInputStream(File) - 拦截系统信息文件
+            XposedHelpers.findAndHookConstructor(
+                fisClass, File::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val file = param.args[0] as? File ?: return
+                        if (isSystemInfoPath(file.absolutePath)) {
+                            param.args[0] = File("/dev/null")
+                            HookUtils.logDebug("$TAG: 重定向系统信息文件: ${file.absolutePath} -> /dev/null")
+                        }
+                    }
+                }
+            )
+
+            // Hook BufferedReader.readLine - 过滤 /proc/cpuinfo 和 /proc/version 中的模拟器特征
+            val readerClass = BufferedReader::class.java
+            val readingSystemInfo = ThreadLocal<Boolean>()
+
+            XposedHelpers.findAndHookMethod(
+                readerClass, "readLine",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (readingSystemInfo.get() == true) return
+                        var line = param.result as? String ?: return
+
+                        // 检查是否包含模拟器特征
+                        if (containsEmulatorKeyword(line)) {
+                            readingSystemInfo.set(true)
+                            try {
+                                // 跳过包含模拟器特征的行
+                                do {
+                                    line = XposedBridge.invokeOriginalMethod(
+                                        param.method, param.thisObject, param.args
+                                    ) as? String ?: break
+                                } while (containsEmulatorKeyword(line))
+                                param.result = line
+                            } finally {
+                                readingSystemInfo.set(false)
+                            }
+                        }
+                    }
+                }
+            )
+
+            HookUtils.log("$TAG: 系统信息文件拦截完成")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: 系统信息文件拦截失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 拦截 getprop 命令输出
+     * getprop 用于读取系统属性，可以检测模拟器
+     */
+    private fun hookGetpropCommand(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val runtimeClass = XposedHelpers.findClass("java.lang.Runtime", lpparam.classLoader)
+
+            // Hook exec(String) - 拦截 getprop 命令
+            XposedHelpers.findAndHookMethod(
+                runtimeClass, "exec", String::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val cmd = param.args[0] as? String ?: return
+                        if (cmd.contains("getprop")) {
+                            // 替换为空命令
+                            param.args[0] = "echo ''"
+                            HookUtils.logDebug("$TAG: 阻止 getprop 命令: $cmd")
+                        }
+                    }
+                }
+            )
+
+            // Hook exec(String[]) - 拦截 getprop 命令
+            XposedHelpers.findAndHookMethod(
+                runtimeClass, "exec", Array<String>::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val cmds = param.args[0] as? Array<*> ?: return
+                        val joined = cmds.joinToString(" ")
+                        if (joined.contains("getprop")) {
+                            param.args[0] = arrayOf("echo", "")
+                            HookUtils.logDebug("$TAG: 阻止 getprop 命令: $joined")
+                        }
+                    }
+                }
+            )
+
+            HookUtils.log("$TAG: getprop 命令拦截完成")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: getprop 命令拦截失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 检查路径是否为系统信息文件
+     */
+    private fun isSystemInfoPath(path: String): Boolean {
+        val normalized = path.replace("//", "/")
+        return normalized == "/proc/cpuinfo" ||
+                normalized == "/proc/meminfo" ||
+                normalized == "/proc/version" ||
+                normalized == "/proc/stat" ||
+                normalized == "/proc/uptime" ||
+                normalized == "/proc/diskstats" ||
+                normalized == "/proc/net/tcp" ||
+                normalized == "/proc/net/wifi" ||
+                normalized == "/proc/tty/drivers"
+    }
+
+    /**
+     * 检查文本是否包含模拟器关键词
+     */
+    private fun containsEmulatorKeyword(text: String): Boolean {
+        val lower = text.lowercase()
+        return EMULATOR_CPU_KEYWORDS.any { lower.contains(it) } ||
+                EMULATOR_VERSION_KEYWORDS.any { lower.contains(it) }
     }
 }

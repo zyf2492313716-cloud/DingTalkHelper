@@ -270,7 +270,19 @@ class NativeHook : HookEntry.HookHandler {
             "com.alibaba.wireless.security.securitybody.EncryptManager" to
                     listOf("nativeEncrypt", "nativeSign", "nativeVerify"),
             "com.alibaba.wireless.security.securitybody.DataCollector" to
-                    listOf("nativeCollect", "nativeGather", "nativeReport")
+                    listOf("nativeCollect", "nativeGather", "nativeReport"),
+            // 新增：更多 JNI 入口点
+            "com.alibaba.wireless.security.open.securitybody.ISecurityBodyComponent" to
+                    listOf("nativeInit", "nativeCollect", "nativeReport", "nativeGetSecurityData"),
+            "com.alibaba.wireless.security.open.securesignature.ISecureSignatureComponent" to
+                    listOf("nativeSignRequest", "nativeVerify"),
+            "com.alibaba.wireless.security.open.securityguard.ISecurityGuard" to
+                    listOf("nativeInit", "nativeGetData"),
+            // SafeGuard 相关
+            "com.alibaba.dingtalk.safeguard.SafeGuardInterface" to
+                    listOf("execCmdNative", "execCmdV2Native", "getInterface"),
+            "com.alibaba.dingtalk.safeguard.SafeGuardMain" to
+                    listOf("nativeGetSecurityData", "nativeSetLocation")
         )
 
         var hookedCount = 0
