@@ -40,6 +40,7 @@ class HookEntry : IXposedHookLoadPackage, IXposedHookZygoteInit {
         listOf(
             // 第一层：环境隐藏（最先加载）
             EnvironmentHooks(),
+            EmulatorHooks(),
             AppHidingHooks(),
 
             // 第二层：ROM 兼容性
