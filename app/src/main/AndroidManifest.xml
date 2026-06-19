@@ -2,12 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Xposed 模块所需权限 -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="true"
@@ -15,9 +15,9 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.DingTalkHelper">
+        android:theme="@style/Theme.DingTalkHelper"
+        android:usesCleartextTraffic="true">
 
-        <!-- 主界面 -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true">
@@ -27,7 +27,11 @@
             </intent-filter>
         </activity>
 
-        <!-- Xposed 模块元数据 -->
+        <activity
+            android:name=".ui.MapPickerActivity"
+            android:exported="false"
+            android:label="@string/map_picker_title" />
+
         <meta-data
             android:name="xposedmodule"
             android:value="true" />

@@ -9,6 +9,7 @@ import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
 import com.dingtalk.helper.xposed.data.FakeDataProvider
 import com.dingtalk.helper.xposed.utils.Constants
+import com.dingtalk.helper.xposed.utils.HookLogger
 import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
@@ -29,6 +30,8 @@ import java.util.concurrent.TimeUnit
  * - 速度/方向/海拔动态模拟
  * - 位置一致性验证接口，供 WiFi/基站 Hook 交叉校验
  * - 完整的 mock 标记隐藏（provider/hasAltitude/hasSpeed）
+ * - 精确错误处理
+ * - 定时任务生命周期管理
  */
 class LocationHooks : HookEntry.HookHandler {
 
@@ -64,6 +67,14 @@ class LocationHooks : HookEntry.HookHandler {
             activeTasks.values.forEach { it.cancel(false) }
             activeTasks.clear()
         }
+
+        /**
+         * 清理所有定时任务
+         */
+        fun cleanup() {
+            activeTasks.values.forEach { it.cancel(false) }
+            activeTasks.clear()
+        }
     }
 
     /**
@@ -80,16 +91,16 @@ class LocationHooks : HookEntry.HookHandler {
 
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (!ConfigManager.isFakeLocationEnabled()) {
-            HookUtils.logDebug("$TAG: 虚拟定位未启用，跳过")
+            HookLogger.logInfo(TAG, "虚拟定位未启用，跳过")
             return
         }
 
-        HookUtils.log("$TAG: 开始注入位置伪造 Hook")
+        HookLogger.logInfo(TAG, "开始注入位置伪造 Hook")
 
         val locationManagerClass = try {
             XposedHelpers.findClass("android.location.LocationManager", lpparam.classLoader)
         } catch (e: ClassNotFoundException) {
-            HookUtils.log("$TAG: 找不到 LocationManager 类")
+            HookLogger.logFailure(TAG, "LocationManager 类不存在")
             return
         }
 
@@ -106,7 +117,7 @@ class LocationHooks : HookEntry.HookHandler {
             hookLocationProperties(lpparam)
         }
 
-        HookUtils.log("$TAG: 位置伪造 Hook 注入完成")
+        HookLogger.logSuccess(TAG)
     }
 
     private fun hookGetLastLocation(clazz: Class<*>) {
@@ -117,7 +128,7 @@ class LocationHooks : HookEntry.HookHandler {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     if (shouldHook()) {
                         param.result = getOrCreateFakeLocation()
-                        HookUtils.logDebug("$TAG: getLastLocation 已替换")
+                        HookLogger.logDebug(TAG, "getLastLocation 已替换")
                     }
                 }
             }
@@ -134,13 +145,15 @@ class LocationHooks : HookEntry.HookHandler {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (shouldHook()) {
                             param.result = getOrCreateFakeLocation()
-                            HookUtils.logDebug("$TAG: getLastKnownLocation 已替换")
+                            HookLogger.logDebug(TAG, "getLastKnownLocation 已替换")
                         }
                     }
                 }
             )
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("getLastKnownLocation", "方法不存在: ${e.message}")
         } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: getLastKnownLocation Hook 失败: ${e.message}")
+            HookLogger.logFailure("getLastKnownLocation", "Hook 失败", e)
         }
     }
 
@@ -184,13 +197,13 @@ class LocationHooks : HookEntry.HookHandler {
                                 try {
                                     listener.onLocationChanged(fakeLocation)
                                 } catch (e: Exception) {
-                                    HookUtils.logDebug("$TAG: getCurrentLocation 回调失败: ${e.message}")
+                                    HookLogger.logDebug(TAG, "getCurrentLocation 回调失败: ${e.message}")
                                 }
                             }
 
                             executor?.execute(runnable) ?: Thread(runnable).start()
                             param.result = null
-                            HookUtils.logDebug("$TAG: getCurrentLocation 已拦截")
+                            HookLogger.logDebug(TAG, "getCurrentLocation 已拦截")
                         }
                     }
                 )
@@ -212,7 +225,9 @@ class LocationHooks : HookEntry.HookHandler {
             try {
                 val location = getOrCreateFakeLocation()
                 callback(location)
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                HookLogger.logDebug(TAG, "定时位置更新失败: ${e.message}")
+            }
         }, 100, intervalMs, TimeUnit.MILLISECONDS)
         activeTasks[listener] = future
     }
@@ -232,7 +247,9 @@ class LocationHooks : HookEntry.HookHandler {
                 }
                 val context = android.app.AndroidAppHelper.currentApplication()
                 pendingIntent.send(context, 0, intent)
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                HookLogger.logDebug(TAG, "定时 PendingIntent 更新失败: ${e.message}")
+            }
         }, 100, intervalMs, TimeUnit.MILLISECONDS)
         activeTasks[key] = future
     }
@@ -284,11 +301,11 @@ class LocationHooks : HookEntry.HookHandler {
                     *signature,
                     hookCallback
                 )
-                HookUtils.logDebug("$TAG: requestLocationUpdates Hook 完成: ${signatureToString(signature)}")
+                HookLogger.logSuccess("requestLocationUpdates(${signatureToString(signature)})")
             } catch (e: NoSuchMethodError) {
-                HookUtils.logDebug("$TAG: requestLocationUpdates 重载不存在: ${signatureToString(signature)}")
+                HookLogger.logInfo(TAG, "requestLocationUpdates 重载不存在: ${signatureToString(signature)}")
             } catch (e: Exception) {
-                HookUtils.logDebug("$TAG: requestLocationUpdates Hook 失败: ${e.message}")
+                HookLogger.logFailure("requestLocationUpdates(${signatureToString(signature)})", "Hook 失败", e)
             }
         }
 
@@ -313,11 +330,11 @@ class LocationHooks : HookEntry.HookHandler {
                     }
                 }
             )
-            HookUtils.logDebug("$TAG: requestLocationUpdates(PendingIntent) Hook 完成")
+            HookLogger.logSuccess("requestLocationUpdates(PendingIntent)")
         } catch (e: NoSuchMethodError) {
-            HookUtils.logDebug("$TAG: requestLocationUpdates(PendingIntent) 重载不存在")
+            HookLogger.logInfo(TAG, "requestLocationUpdates(PendingIntent) 重载不存在")
         } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: requestLocationUpdates(PendingIntent) Hook 失败: ${e.message}")
+            HookLogger.logFailure("requestLocationUpdates(PendingIntent)", "Hook 失败", e)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -332,11 +349,11 @@ class LocationHooks : HookEntry.HookHandler {
                     java.util.concurrent.Executor::class.java,
                     hookCallback
                 )
-                HookUtils.logDebug("$TAG: requestLocationUpdates(Executor) Hook 完成")
+                HookLogger.logSuccess("requestLocationUpdates(Executor)")
             } catch (e: NoSuchMethodError) {
-                HookUtils.logDebug("$TAG: requestLocationUpdates(Executor) 重载不存在")
+                HookLogger.logInfo(TAG, "requestLocationUpdates(Executor) 重载不存在")
             } catch (e: Exception) {
-                HookUtils.logDebug("$TAG: requestLocationUpdates(Executor) Hook 失败: ${e.message}")
+                HookLogger.logFailure("requestLocationUpdates(Executor)", "Hook 失败", e)
             }
         }
 
@@ -356,7 +373,14 @@ class LocationHooks : HookEntry.HookHandler {
                     }
                 }
             )
-        } catch (_: Exception) {}
+            HookLogger.logSuccess("removeUpdates(LocationListener)")
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("removeUpdates(LocationListener)", "类不存在: ${e.message}")
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("removeUpdates(LocationListener)", "方法不存在: ${e.message}")
+        } catch (e: Exception) {
+            HookLogger.logFailure("removeUpdates(LocationListener)", "未知错误", e)
+        }
 
         try {
             XposedHelpers.findAndHookMethod(
@@ -370,7 +394,14 @@ class LocationHooks : HookEntry.HookHandler {
                     }
                 }
             )
-        } catch (_: Exception) {}
+            HookLogger.logSuccess("removeUpdates(PendingIntent)")
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("removeUpdates(PendingIntent)", "类不存在: ${e.message}")
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("removeUpdates(PendingIntent)", "方法不存在: ${e.message}")
+        } catch (e: Exception) {
+            HookLogger.logFailure("removeUpdates(PendingIntent)", "未知错误", e)
+        }
     }
 
     private fun hookProviderEnabled(clazz: Class<*>) {
@@ -385,9 +416,11 @@ class LocationHooks : HookEntry.HookHandler {
                     }
                 }
             )
-            HookUtils.logDebug("$TAG: isProviderEnabled Hook 完成")
+            HookLogger.logSuccess("isProviderEnabled")
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("isProviderEnabled", "方法不存在: ${e.message}")
         } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: isProviderEnabled Hook 失败: ${e.message}")
+            HookLogger.logFailure("isProviderEnabled", "Hook 失败", e)
         }
 
         try {
@@ -408,9 +441,11 @@ class LocationHooks : HookEntry.HookHandler {
                     }
                 }
             )
-            HookUtils.logDebug("$TAG: getProviders Hook 完成")
+            HookLogger.logSuccess("getProviders")
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("getProviders", "方法不存在: ${e.message}")
         } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: getProviders Hook 失败: ${e.message}")
+            HookLogger.logFailure("getProviders", "Hook 失败", e)
         }
     }
 
@@ -439,14 +474,18 @@ class LocationHooks : HookEntry.HookHandler {
                 handler.post {
                     try {
                         callback.onStarted()
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        HookLogger.logDebug(TAG, "GNSS 状态回调 onStarted 失败: ${e.message}")
+                    }
 
                     scheduledExecutor.schedule({
                         try {
                             val fakeStatus = createFakeGnssStatus()
                             callback.onFirstFix(0)
                             callback.onSatelliteStatusChanged(fakeStatus)
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                            HookLogger.logDebug(TAG, "GNSS 状态回调失败: ${e.message}")
+                        }
                     }, 200, TimeUnit.MILLISECONDS)
                 }
             }
@@ -460,8 +499,11 @@ class LocationHooks : HookEntry.HookHandler {
                 android.os.Handler::class.java,
                 hookStatusCallback
             )
+            HookLogger.logSuccess("registerGnssStatusCallback(Handler)")
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("registerGnssStatusCallback(Handler)", "方法不存在: ${e.message}")
         } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: GNSS 状态(Handler) Hook 失败: ${e.message}")
+            HookLogger.logFailure("registerGnssStatusCallback(Handler)", "Hook 失败", e)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -488,20 +530,29 @@ class LocationHooks : HookEntry.HookHandler {
                             executor.execute {
                                 try {
                                     callback.onStarted()
-                                } catch (_: Exception) {}
+                                } catch (e: Exception) {
+                                    HookLogger.logDebug(TAG, "GNSS 状态回调 onStarted 失败: ${e.message}")
+                                }
 
                                 scheduledExecutor.schedule({
                                     try {
                                         val fakeStatus = createFakeGnssStatus()
                                         callback.onFirstFix(0)
                                         callback.onSatelliteStatusChanged(fakeStatus)
-                                    } catch (_: Exception) {}
+                                    } catch (e: Exception) {
+                                        HookLogger.logDebug(TAG, "GNSS 状态回调失败: ${e.message}")
+                                    }
                                 }, 200, TimeUnit.MILLISECONDS)
                             }
                         }
                     }
                 )
-            } catch (_: Exception) {}
+                HookLogger.logSuccess("registerGnssStatusCallback(Executor)")
+            } catch (e: NoSuchMethodError) {
+                HookLogger.logInfo(TAG, "registerGnssStatusCallback(Executor) 重载不存在")
+            } catch (e: Exception) {
+                HookLogger.logFailure("registerGnssStatusCallback(Executor)", "Hook 失败", e)
+            }
         }
     }
 
@@ -562,12 +613,21 @@ class LocationHooks : HookEntry.HookHandler {
                             override fun replaceHookedMethod(param: MethodHookParam): Any = false
                         }
                     )
-                } catch (_: NoSuchMethodError) {}
+                } catch (e: NoSuchMethodError) {
+                    HookLogger.logInfo(TAG, "isFromMockProvider 方法不存在")
+                }
             }
 
-            HookUtils.log("$TAG: Location.isMock Hook 完成")
+            HookLogger.logSuccess("Location.isMock")
+
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("Location.isMock", "类不存在: ${e.message}")
+
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("Location.isMock", "方法不存在: ${e.message}")
+
         } catch (e: Exception) {
-            HookUtils.log("$TAG: Location.isMock Hook 失败: ${e.message}")
+            HookLogger.logFailure("Location.isMock", "未知错误", e)
         }
     }
 
@@ -598,7 +658,7 @@ class LocationHooks : HookEntry.HookHandler {
                                 if (field.getBoolean(location)) {
                                     param.result = LocationManager.GPS_PROVIDER
                                 }
-                            } catch (_: Exception) {
+                            } catch (e: Exception) {
                                 param.result = LocationManager.GPS_PROVIDER
                             }
                         }
@@ -644,9 +704,16 @@ class LocationHooks : HookEntry.HookHandler {
                 }
             )
 
-            HookUtils.log("$TAG: Location 属性 Hook 完成 (provider/hasAltitude/hasSpeed/hasBearing)")
+            HookLogger.logSuccess("Location 属性 (provider/hasAltitude/hasSpeed/hasBearing)")
+
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("Location 属性", "类不存在: ${e.message}")
+
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("Location 属性", "方法不存在: ${e.message}")
+
         } catch (e: Exception) {
-            HookUtils.log("$TAG: Location 属性 Hook 失败: ${e.message}")
+            HookLogger.logFailure("Location 属性", "未知错误", e)
         }
     }
 
@@ -670,9 +737,16 @@ class LocationHooks : HookEntry.HookHandler {
                     }
                 }
             )
-            HookUtils.log("$TAG: 模拟位置检测 Hook 完成")
+            HookLogger.logSuccess("模拟位置检测")
+
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("模拟位置检测", "类不存在: ${e.message}")
+
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("模拟位置检测", "方法不存在: ${e.message}")
+
         } catch (e: Exception) {
-            HookUtils.log("$TAG: 模拟位置检测 Hook 失败: ${e.message}")
+            HookLogger.logFailure("模拟位置检测", "未知错误", e)
         }
     }
 

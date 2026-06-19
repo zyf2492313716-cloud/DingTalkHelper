@@ -14,8 +14,16 @@
 # 保留数据类（ConfigManager 内部类）
 -keep class com.dingtalk.helper.utils.ConfigManager$* { *; }
 
+# 保留 ConfigEncryption（反射使用）
+-keep class com.dingtalk.helper.utils.ConfigEncryption { *; }
+-keep class com.dingtalk.helper.utils.ConfigEncryption$* { *; }
+
 # 保留 Activity（反射实例化）
 -keep class com.dingtalk.helper.ui.MainActivity { *; }
+
+# 保留加密相关类
+-keep class javax.crypto.** { *; }
+-keep class java.security.** { *; }
 
 # 移除日志（release 构建）
 -assumenosideeffects class android.util.Log {

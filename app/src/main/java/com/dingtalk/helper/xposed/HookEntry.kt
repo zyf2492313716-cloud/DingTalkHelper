@@ -20,11 +20,11 @@ class HookEntry : IXposedHookLoadPackage, IXposedHookZygoteInit {
     companion object {
         const val TAG = Constants.LOG_PREFIX
 
-        // 模块实例
-        var instance: HookEntry? = null
+        // M12 修复：添加 @Volatile 保证多线程可见性
+        @Volatile var instance: HookEntry? = null
 
-        // 模块上下文
-        var moduleContext: Context? = null
+        // M12 修复：添加 @Volatile 保证多线程可见性
+        @Volatile var moduleContext: Context? = null
 
         // 模块是否已初始化
         var isInitialized = false
@@ -38,7 +38,10 @@ class HookEntry : IXposedHookLoadPackage, IXposedHookZygoteInit {
     // Hook 处理器列表（按优先级排序）
     private val hookHandlers by lazy {
         listOf(
-            // 第一层：环境隐藏（最先加载）
+            // 第零层：深度隐藏（最先加载，在所有其他 Hook 之前）
+            DeepHidingHooks(),
+
+            // 第一层：环境隐藏
             EnvironmentHooks(),
             EmulatorHooks(),
             AppHidingHooks(),
@@ -59,7 +62,13 @@ class HookEntry : IXposedHookLoadPackage, IXposedHookZygoteInit {
             CellHooks(),
             SensorHooks(),
 
-            // 第五层：风控数据拦截（最后加载）
+            // 第五层：数据采集拦截（系统 API 层面）
+            DataCollectionInterceptor(),
+
+            // 第六层：Native 层拦截（JNI 边界）
+            NativeHook(),
+
+            // 第七层：风控数据拦截（SDK 层面，最后加载）
             RiskControlHooks()
         )
     }
@@ -144,7 +153,7 @@ class HookEntry : IXposedHookLoadPackage, IXposedHookZygoteInit {
             val context = XposedHelpers.callMethod(activityThread, "getSystemContext") as Context
             moduleContext = context
 
-            // 初始化配置管理器
+            // 初始化配置管理器（内部会初始化 ConfigEncryption）
             ConfigManager.init(context)
 
             HookUtils.log("$TAG: 模块上下文初始化成功")

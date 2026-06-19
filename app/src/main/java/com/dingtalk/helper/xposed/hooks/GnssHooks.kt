@@ -9,6 +9,7 @@ import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
 import com.dingtalk.helper.xposed.data.FakeDataProvider
 import com.dingtalk.helper.xposed.utils.Constants
+import com.dingtalk.helper.xposed.utils.HookLogger
 import com.dingtalk.helper.xposed.utils.HookUtils
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
@@ -19,10 +20,10 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
  * GNSS 卫星数据伪造 Hook
  * 提供伪造的 GPS 卫星数据以保持一致性
  *
- * 借鉴 XposedFakeLocation 的 GNSS 伪造思路：
- * - Hook GnssStatus 返回伪造的卫星数量和信号数据
- * - 返回伪造的 GNSS 测量数据（多星座卫星）
- * - 返回伪造的导航消息数据
+ * 优化特性：
+ * - 统一使用类级别的 ScheduledExecutorService
+ * - 精确错误处理
+ * - 定时任务生命周期管理
  */
 class GnssHooks : HookEntry.HookHandler {
 
@@ -48,6 +49,14 @@ class GnssHooks : HookEntry.HookHandler {
 
         // 跟踪活跃的定时任务，用于取消
         private val activeNavMessageTasks = java.util.concurrent.ConcurrentHashMap<GnssNavigationMessage.Callback, java.util.concurrent.ScheduledFuture<*>>()
+
+        /**
+         * 清理所有定时任务
+         */
+        fun cleanup() {
+            activeNavMessageTasks.values.forEach { it.cancel(false) }
+            activeNavMessageTasks.clear()
+        }
     }
 
     private val satellites: List<FakeDataProvider.SatelliteInfo>
@@ -56,14 +65,14 @@ class GnssHooks : HookEntry.HookHandler {
     override fun hook(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (!ConfigManager.isEnabled()) return
 
-        HookUtils.log("$TAG: 开始注入 GNSS 数据伪造 Hook")
+        HookLogger.logInfo(TAG, "开始注入 GNSS 数据伪造 Hook")
 
         hookGnssStatus(lpparam)
         hookGnssMeasurements(lpparam)
         hookGnssMeasurement(lpparam)
         hookGnssNavigationMessage(lpparam)
 
-        HookUtils.log("$TAG: GNSS Hook 注入完成")
+        HookLogger.logSuccess(TAG)
     }
 
     /**
@@ -203,9 +212,16 @@ class GnssHooks : HookEntry.HookHandler {
                 }
             )
 
-            HookUtils.log("$TAG: GnssStatus Hook 完成")
+            HookLogger.logSuccess("GnssStatus")
+
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("GnssStatus", "类不存在: ${e.message}")
+
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("GnssStatus", "方法不存在: ${e.message}")
+
         } catch (e: Exception) {
-            HookUtils.log("$TAG: GnssStatus Hook 失败: ${e.message}")
+            HookLogger.logFailure("GnssStatus", "未知错误", e)
         }
     }
 
@@ -235,9 +251,16 @@ class GnssHooks : HookEntry.HookHandler {
             // Hook GnssClock
             hookGnssClock(lpparam)
 
-            HookUtils.log("$TAG: GnssMeasurementsEvent Hook 完成")
+            HookLogger.logSuccess("GnssMeasurementsEvent")
+
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("GnssMeasurementsEvent", "类不存在: ${e.message}")
+
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("GnssMeasurementsEvent", "方法不存在: ${e.message}")
+
         } catch (e: Exception) {
-            HookUtils.log("$TAG: GnssMeasurementsEvent Hook 失败: ${e.message}")
+            HookLogger.logFailure("GnssMeasurementsEvent", "未知错误", e)
         }
     }
 
@@ -259,9 +282,16 @@ class GnssHooks : HookEntry.HookHandler {
                 }
             )
 
-            HookUtils.log("$TAG: GnssMeasurement Hook 完成")
+            HookLogger.logSuccess("GnssMeasurement")
+
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("GnssMeasurement", "类不存在: ${e.message}")
+
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("GnssMeasurement", "方法不存在: ${e.message}")
+
         } catch (e: Exception) {
-            HookUtils.log("$TAG: GnssMeasurement Hook 失败: ${e.message}")
+            HookLogger.logFailure("GnssMeasurement", "未知错误", e)
         }
     }
 
@@ -290,7 +320,11 @@ class GnssHooks : HookEntry.HookHandler {
                 XposedHelpers.callMethod(builder, "setCarrierFrequencyHz", sat.carrierFrequencyHz)
                 XposedHelpers.callMethod(builder, "setAutomaticGainControlLevelDb", agc)
                 return XposedHelpers.callMethod(builder, "build") as GnssMeasurement
-            } catch (_: Exception) {}
+            } catch (e: ClassNotFoundException) {
+                HookLogger.logDebug(TAG, "GnssMeasurement.Builder 不存在，使用反射方式")
+            } catch (e: Exception) {
+                HookLogger.logDebug(TAG, "创建 GnssMeasurement.Builder 失败: ${e.message}")
+            }
         }
 
         val measurement = XposedHelpers.newInstance(GnssMeasurement::class.java) as GnssMeasurement
@@ -390,9 +424,16 @@ class GnssHooks : HookEntry.HookHandler {
                 }
             )
 
-            HookUtils.log("$TAG: GnssClock Hook 完成")
+            HookLogger.logSuccess("GnssClock")
+
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("GnssClock", "类不存在: ${e.message}")
+
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("GnssClock", "方法不存在: ${e.message}")
+
         } catch (e: Exception) {
-            HookUtils.log("$TAG: GnssClock Hook 失败: ${e.message}")
+            HookLogger.logFailure("GnssClock", "未知错误", e)
         }
     }
 
@@ -431,7 +472,7 @@ class GnssHooks : HookEntry.HookHandler {
                             val fakeMessage = createFakeGnssNavigationMessage()
                             callback.onGnssNavigationMessageReceived(fakeMessage)
                         } catch (e: Exception) {
-                            HookUtils.log("$TAG: 发送伪造导航消息失败: ${e.message}")
+                            HookLogger.logFailure(TAG, "发送伪造导航消息失败", e)
                         }
                     }
 
@@ -442,7 +483,9 @@ class GnssHooks : HookEntry.HookHandler {
 
                     // 使用类级别的 scheduledExecutor，避免每次创建新 executor
                     val future = scheduledExecutor.scheduleAtFixedRate({
-                        try { targetExecutor.execute { deliver() } } catch (_: Exception) {}
+                        try { targetExecutor.execute { deliver() } } catch (e: Exception) {
+                            HookLogger.logDebug(TAG, "定时发送导航消息失败: ${e.message}")
+                        }
                     }, 1000, 1000, java.util.concurrent.TimeUnit.MILLISECONDS)
 
                     // 记录活跃任务
@@ -463,9 +506,13 @@ class GnssHooks : HookEntry.HookHandler {
                         }
                     }
                 )
-                HookUtils.log("$TAG: unregisterGnssNavigationMessageCallback Hook 完成")
+                HookLogger.logSuccess("unregisterGnssNavigationMessageCallback")
+            } catch (e: ClassNotFoundException) {
+                HookLogger.logFailure("unregisterGnssNavigationMessageCallback", "类不存在: ${e.message}")
+            } catch (e: NoSuchMethodError) {
+                HookLogger.logFailure("unregisterGnssNavigationMessageCallback", "方法不存在: ${e.message}")
             } catch (e: Exception) {
-                HookUtils.log("$TAG: unregisterGnssNavigationMessageCallback Hook 失败: ${e.message}")
+                HookLogger.logFailure("unregisterGnssNavigationMessageCallback", "未知错误", e)
             }
 
             // (Callback, Handler)
@@ -477,11 +524,11 @@ class GnssHooks : HookEntry.HookHandler {
                     android.os.Handler::class.java,
                     hookCallback
                 )
-                HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Callback, Handler) Hook 完成")
+                HookLogger.logSuccess("registerGnssNavigationMessageCallback(Callback, Handler)")
             } catch (e: NoSuchMethodError) {
-                HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Callback, Handler) 重载不存在")
+                HookLogger.logInfo(TAG, "registerGnssNavigationMessageCallback(Callback, Handler) 重载不存在")
             } catch (e: Exception) {
-                HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Callback, Handler) Hook 失败: ${e.message}")
+                HookLogger.logFailure("registerGnssNavigationMessageCallback(Callback, Handler)", "Hook 失败", e)
             }
 
             // API 30+: (Executor, Callback)
@@ -494,17 +541,24 @@ class GnssHooks : HookEntry.HookHandler {
                         GnssNavigationMessage.Callback::class.java,
                         hookCallback
                     )
-                    HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Executor, Callback) Hook 完成")
+                    HookLogger.logSuccess("registerGnssNavigationMessageCallback(Executor, Callback)")
                 } catch (e: NoSuchMethodError) {
-                    HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Executor, Callback) 重载不存在")
+                    HookLogger.logInfo(TAG, "registerGnssNavigationMessageCallback(Executor, Callback) 重载不存在")
                 } catch (e: Exception) {
-                    HookUtils.log("$TAG: registerGnssNavigationMessageCallback(Executor, Callback) Hook 失败: ${e.message}")
+                    HookLogger.logFailure("registerGnssNavigationMessageCallback(Executor, Callback)", "Hook 失败", e)
                 }
             }
 
-            HookUtils.log("$TAG: GnssNavigationMessage Hook 完成")
+            HookLogger.logSuccess("GnssNavigationMessage")
+
+        } catch (e: ClassNotFoundException) {
+            HookLogger.logFailure("GnssNavigationMessage", "类不存在: ${e.message}")
+
+        } catch (e: NoSuchMethodError) {
+            HookLogger.logFailure("GnssNavigationMessage", "方法不存在: ${e.message}")
+
         } catch (e: Exception) {
-            HookUtils.log("$TAG: GnssNavigationMessage Hook 失败: ${e.message}")
+            HookLogger.logFailure("GnssNavigationMessage", "未知错误", e)
         }
     }
 

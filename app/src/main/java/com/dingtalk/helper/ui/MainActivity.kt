@@ -7,11 +7,14 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.dingtalk.helper.R
 import com.dingtalk.helper.databinding.ActivityMainBinding
+import com.dingtalk.helper.utils.ConfigEncryption
 import com.dingtalk.helper.xposed.utils.Constants
 
 /**
  * 主界面
  * 提供虚拟定位配置功能
+ *
+ * 使用 ConfigEncryption 加密存储配置
  */
 class MainActivity : AppCompatActivity() {
 
@@ -23,7 +26,10 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        prefs = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        // 使用加密的 SharedPreferences
+        // 文件名经过哈希混淆，与 Xposed 模块端使用相同的加密配置
+        ConfigEncryption.init(this)
+        prefs = ConfigEncryption.getEncryptedPreferences(this, Constants.PREFS_NAME)
 
         initViews()
         loadSettings()

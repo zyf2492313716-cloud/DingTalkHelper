@@ -2,8 +2,11 @@ package com.dingtalk.helper.xposed.hooks
 
 import com.dingtalk.helper.utils.ConfigManager
 import com.dingtalk.helper.xposed.HookEntry
+import com.dingtalk.helper.xposed.utils.ClassFinder
+import com.dingtalk.helper.xposed.utils.ClassPattern
 import com.dingtalk.helper.xposed.utils.Constants
 import com.dingtalk.helper.xposed.utils.HookUtils
+import com.dingtalk.helper.xposed.utils.MethodSignature
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
@@ -281,17 +284,6 @@ class RiskControlHooks : HookEntry.HookHandler {
 
     private fun hookDataCollection(lpparam: XC_LoadPackage.LoadPackageParam) {
         val classLoader = lpparam.classLoader
-        val collectorClasses = listOf(
-            "com.alibaba.wireless.security.securitybody.DataCollector",
-            "com.alibaba.wireless.security.securitybody.DataCollection",
-            "com.alibaba.wireless.security.securitybody.SecurityBodyData",
-            "com.alibaba.security.ddsec.DataCollector",
-            "com.alibaba.security.lbswua.DataCollector",
-            "com.alibaba.security.SecurityDataCollector",
-            "com.alibaba.wireless.security.securitybody.EnvironmentInfo",
-            "com.alibaba.wireless.security.securitybody.DeviceInfo"
-        )
-
         val collectMethods = listOf(
             "collect", "collectData", "collectAll", "gather", "gatherData",
             "buildData", "buildMap", "buildParams", "prepareData",
@@ -300,20 +292,46 @@ class RiskControlHooks : HookEntry.HookHandler {
             "generateParams", "generateData"
         )
 
-        for (className in collectorClasses) {
-            try {
-                val clazz = XposedHelpers.findClass(className, classLoader)
+        // 动态查找数据收集类
+        val classes = ClassFinder.findClassesByPatterns(classLoader, Constants.COLLECTOR_CLASS_PATTERNS)
+
+        if (classes.isNotEmpty()) {
+            HookUtils.log("$TAG: 动态找到 ${classes.size} 个数据收集类")
+            for (clazz in classes) {
                 for (method in collectMethods) {
                     hookMethodWithFallback(clazz, method) { param ->
                         tamperMethodResult(param)
-                        HookUtils.logDebug("$TAG: 拦截数据收集 $className.$method")
+                        HookUtils.logDebug("$TAG: 拦截数据收集 ${clazz.name}.$method")
                     }
                 }
-                HookUtils.logDebug("$TAG: 数据收集类 Hook 完成: $className")
-            } catch (_: ClassNotFoundException) {
-                continue
-            } catch (e: Exception) {
-                HookUtils.logDebug("$TAG: 数据收集类 Hook 失败 $className: ${e.message}")
+            }
+        } else {
+            HookUtils.log("$TAG: 动态查找未找到数据收集类，回退到硬编码列表")
+            @Suppress("DEPRECATION")
+            val collectorClasses = listOf(
+                "com.alibaba.wireless.security.securitybody.DataCollector",
+                "com.alibaba.wireless.security.securitybody.DataCollection",
+                "com.alibaba.wireless.security.securitybody.SecurityBodyData",
+                "com.alibaba.security.ddsec.DataCollector",
+                "com.alibaba.security.lbswua.DataCollector",
+                "com.alibaba.security.SecurityDataCollector",
+                "com.alibaba.wireless.security.securitybody.EnvironmentInfo",
+                "com.alibaba.wireless.security.securitybody.DeviceInfo"
+            )
+            for (className in collectorClasses) {
+                try {
+                    val clazz = XposedHelpers.findClass(className, classLoader)
+                    for (method in collectMethods) {
+                        hookMethodWithFallback(clazz, method) { param ->
+                            tamperMethodResult(param)
+                            HookUtils.logDebug("$TAG: 拦截数据收集 $className.$method")
+                        }
+                    }
+                } catch (_: ClassNotFoundException) {
+                    continue
+                } catch (e: Exception) {
+                    HookUtils.logDebug("$TAG: 数据收集类 Hook 失败 $className: ${e.message}")
+                }
             }
         }
     }
@@ -329,22 +347,37 @@ class RiskControlHooks : HookEntry.HookHandler {
     }
 
     private fun hookDeviceIdentifierMethods(classLoader: ClassLoader) {
-        val deviceIdClasses = listOf(
-            "com.alibaba.wireless.security.securitybody.DeviceIdManager",
-            "com.alibaba.security.DeviceIdentifier",
-            "com.alibaba.wireless.security.securitybody.DeviceInfo"
-        )
+        // 动态查找设备标识收集类
+        val classes = ClassFinder.findClassesByPatterns(classLoader, Constants.DEVICE_ID_CLASS_PATTERNS)
 
-        for (className in deviceIdClasses) {
-            try {
-                val clazz = XposedHelpers.findClass(className, classLoader)
+        if (classes.isNotEmpty()) {
+            HookUtils.log("$TAG: 动态找到 ${classes.size} 个设备标识类")
+            for (clazz in classes) {
                 for (method in listOf("getDeviceId", "getIMEI", "getIMSI", "getAndroidId",
                     "getSerialNumber", "getMacAddress", "getWifiMac", "getBluetoothMac",
                     "getAdvertisingId", "getOAID", "getUA")) {
                     hookMethodReturnString(clazz, method, getFakeValueForMethod(method))
                 }
-            } catch (_: ClassNotFoundException) {
-                continue
+            }
+        } else {
+            HookUtils.log("$TAG: 动态查找未找到设备标识类，回退到硬编码列表")
+            @Suppress("DEPRECATION")
+            val deviceIdClasses = listOf(
+                "com.alibaba.wireless.security.securitybody.DeviceIdManager",
+                "com.alibaba.security.DeviceIdentifier",
+                "com.alibaba.wireless.security.securitybody.DeviceInfo"
+            )
+            for (className in deviceIdClasses) {
+                try {
+                    val clazz = XposedHelpers.findClass(className, classLoader)
+                    for (method in listOf("getDeviceId", "getIMEI", "getIMSI", "getAndroidId",
+                        "getSerialNumber", "getMacAddress", "getWifiMac", "getBluetoothMac",
+                        "getAdvertisingId", "getOAID", "getUA")) {
+                        hookMethodReturnString(clazz, method, getFakeValueForMethod(method))
+                    }
+                } catch (_: ClassNotFoundException) {
+                    continue
+                }
             }
         }
 
@@ -371,15 +404,12 @@ class RiskControlHooks : HookEntry.HookHandler {
     }
 
     private fun hookEnvironmentCollection(classLoader: ClassLoader) {
-        val envClasses = listOf(
-            "com.alibaba.wireless.security.securitybody.EnvironmentCollector",
-            "com.alibaba.security.EnvironmentDetector",
-            "com.alibaba.wireless.security.securitybody.EnvInfo"
-        )
+        // 动态查找环境检测类
+        val classes = ClassFinder.findClassesByPatterns(classLoader, Constants.ENVIRONMENT_CLASS_PATTERNS)
 
-        for (className in envClasses) {
-            try {
-                val clazz = XposedHelpers.findClass(className, classLoader)
+        if (classes.isNotEmpty()) {
+            HookUtils.log("$TAG: 动态找到 ${classes.size} 个环境检测类")
+            for (clazz in classes) {
                 for (method in listOf(
                     "collectEnvironment", "collectEnvInfo", "getEnvironment",
                     "isRoot", "checkRoot", "detectRoot", "hasRoot",
@@ -396,22 +426,48 @@ class RiskControlHooks : HookEntry.HookHandler {
                         tamperMethodResult(param)
                     }
                 }
-            } catch (_: ClassNotFoundException) {
-                continue
+            }
+        } else {
+            HookUtils.log("$TAG: 动态查找未找到环境检测类，回退到硬编码列表")
+            @Suppress("DEPRECATION")
+            val envClasses = listOf(
+                "com.alibaba.wireless.security.securitybody.EnvironmentCollector",
+                "com.alibaba.security.EnvironmentDetector",
+                "com.alibaba.wireless.security.securitybody.EnvInfo"
+            )
+            for (className in envClasses) {
+                try {
+                    val clazz = XposedHelpers.findClass(className, classLoader)
+                    for (method in listOf(
+                        "collectEnvironment", "collectEnvInfo", "getEnvironment",
+                        "isRoot", "checkRoot", "detectRoot", "hasRoot",
+                        "isXposed", "checkXposed", "detectXposed", "hasXposed",
+                        "isMockLocation", "checkMockLocation", "detectMock",
+                        "isDebug", "checkDebug", "detectDebug",
+                        "isEmulator", "checkEmulator", "detectEmulator",
+                        "isVpn", "checkVpn", "detectVpn",
+                        "isProxy", "checkProxy", "detectProxy",
+                        "isHook", "checkHook", "detectHook",
+                        "isTampered", "checkTampered", "checkIntegrity"
+                    )) {
+                        hookMethodWithFallback(clazz, method) { param ->
+                            tamperMethodResult(param)
+                        }
+                    }
+                } catch (_: ClassNotFoundException) {
+                    continue
+                }
             }
         }
     }
 
     private fun hookLocationCollection(classLoader: ClassLoader) {
-        val locationClasses = listOf(
-            "com.alibaba.wireless.security.securitybody.LocationCollector",
-            "com.alibaba.security.LocationInfo",
-            "com.alibaba.wireless.security.lbswua.LbsCollector"
-        )
+        // 动态查找位置收集类
+        val classes = ClassFinder.findClassesByPatterns(classLoader, Constants.LOCATION_CLASS_PATTERNS)
 
-        for (className in locationClasses) {
-            try {
-                val clazz = XposedHelpers.findClass(className, classLoader)
+        if (classes.isNotEmpty()) {
+            HookUtils.log("$TAG: 动态找到 ${classes.size} 个位置收集类")
+            for (clazz in classes) {
                 for (method in listOf(
                     "collectLocation", "getLocation", "getLastLocation",
                     "requestLocation", "getGpsLocation", "getNetworkLocation",
@@ -421,8 +477,30 @@ class RiskControlHooks : HookEntry.HookHandler {
                         tamperMethodResult(param)
                     }
                 }
-            } catch (_: ClassNotFoundException) {
-                continue
+            }
+        } else {
+            HookUtils.log("$TAG: 动态查找未找到位置收集类，回退到硬编码列表")
+            @Suppress("DEPRECATION")
+            val locationClasses = listOf(
+                "com.alibaba.wireless.security.securitybody.LocationCollector",
+                "com.alibaba.security.LocationInfo",
+                "com.alibaba.wireless.security.lbswua.LbsCollector"
+            )
+            for (className in locationClasses) {
+                try {
+                    val clazz = XposedHelpers.findClass(className, classLoader)
+                    for (method in listOf(
+                        "collectLocation", "getLocation", "getLastLocation",
+                        "requestLocation", "getGpsLocation", "getNetworkLocation",
+                        "getCellInfo", "getWifiInfo", "getScanResults"
+                    )) {
+                        hookMethodWithFallback(clazz, method) { param ->
+                            tamperMethodResult(param)
+                        }
+                    }
+                } catch (_: ClassNotFoundException) {
+                    continue
+                }
             }
         }
     }
@@ -435,26 +513,85 @@ class RiskControlHooks : HookEntry.HookHandler {
 
     private fun hookSecurityClasses(lpparam: XC_LoadPackage.LoadPackageParam) {
         val classLoader = lpparam.classLoader
-        val allClassNames = Constants.LBSWUA_CLASS_NAMES +
-                Constants.DDSEC_CLASS_NAMES +
-                Constants.RISK_CONTROL_CLASS_NAMES
+
+        // 动态查找所有风控类
+        val lbswuaClasses = ClassFinder.findClassesByPatterns(classLoader, Constants.LBSWUA_CLASS_PATTERNS)
+        val ddsecClasses = ClassFinder.findClassesByPatterns(classLoader, Constants.DDSEC_CLASS_PATTERNS)
+        val riskClasses = ClassFinder.findClassesByPatterns(classLoader, Constants.RISK_CONTROL_CLASS_PATTERNS)
 
         var hookedCount = 0
 
-        for (className in allClassNames) {
+        // Hook lbswua 类
+        for (clazz in lbswuaClasses) {
             try {
-                val clazz = XposedHelpers.findClass(className, classLoader)
-                hookSecurityClass(clazz, className, classLoader)
+                hookSecurityClassByMethods(clazz, Constants.LBSWUA_REPORT_METHODS, "lbswua")
                 hookedCount++
-                HookUtils.logDebug("$TAG: 成功 Hook 风控类: $className")
-            } catch (_: ClassNotFoundException) {
-                continue
+                HookUtils.log("$TAG: 动态 Hook lbswua 类: ${clazz.name}")
             } catch (e: Exception) {
-                HookUtils.logDebug("$TAG: Hook 风控类失败 $className: ${e.message}")
+                HookUtils.logDebug("$TAG: Hook lbswua 类失败 ${clazz.name}: ${e.message}")
+            }
+        }
+
+        // Hook ddsec 类
+        for (clazz in ddsecClasses) {
+            try {
+                hookSecurityClassByMethods(clazz, Constants.DDSEC_GENERATE_METHODS, "ddsec")
+                hookedCount++
+                HookUtils.log("$TAG: 动态 Hook ddsec 类: ${clazz.name}")
+            } catch (e: Exception) {
+                HookUtils.logDebug("$TAG: Hook ddsec 类失败 ${clazz.name}: ${e.message}")
+            }
+        }
+
+        // Hook 风控检测类
+        for (clazz in riskClasses) {
+            try {
+                hookSecurityClassByMethods(clazz, Constants.RISK_CHECK_METHODS, "riskcontrol")
+                hookedCount++
+                HookUtils.log("$TAG: 动态 Hook 风控检测类: ${clazz.name}")
+            } catch (e: Exception) {
+                HookUtils.logDebug("$TAG: Hook 风控检测类失败 ${clazz.name}: ${e.message}")
+            }
+        }
+
+        // 如果动态查找未找到任何类，回退到硬编码列表
+        if (hookedCount == 0) {
+            HookUtils.log("$TAG: 动态查找未找到风控类，回退到硬编码列表")
+            @Suppress("DEPRECATION")
+            val allClassNames = Constants.LBSWUA_CLASS_NAMES +
+                    Constants.DDSEC_CLASS_NAMES +
+                    Constants.RISK_CONTROL_CLASS_NAMES
+
+            for (className in allClassNames) {
+                try {
+                    val clazz = XposedHelpers.findClass(className, classLoader)
+                    hookSecurityClass(clazz, className, classLoader)
+                    hookedCount++
+                    HookUtils.logDebug("$TAG: 成功 Hook 风控类: $className")
+                } catch (_: ClassNotFoundException) {
+                    continue
+                } catch (e: Exception) {
+                    HookUtils.logDebug("$TAG: Hook 风控类失败 $className: ${e.message}")
+                }
             }
         }
 
         HookUtils.log("$TAG: 风控类 Hook 完成，共 $hookedCount 个类")
+    }
+
+    /**
+     * 按方法名列表 Hook 安全类（用于动态查找后的 Hook）
+     */
+    private fun hookSecurityClassByMethods(clazz: Class<*>, methodNames: List<String>, category: String) {
+        for (methodName in methodNames) {
+            hookMethodWithFallback(clazz, methodName) { param ->
+                tamperMethodResult(param)
+                HookUtils.logDebug("$TAG: 篡改 [$category] ${clazz.name}.$methodName")
+            }
+        }
+
+        hookMapParameterMethods(clazz, clazz.name)
+        hookAllDeclaredMethods(clazz, clazz.name)
     }
 
     private fun hookSecurityClass(clazz: Class<*>, className: String, classLoader: ClassLoader) {
@@ -543,16 +680,15 @@ class RiskControlHooks : HookEntry.HookHandler {
 
     private fun hookEncryptFunctions(lpparam: XC_LoadPackage.LoadPackageParam) {
         val classLoader = lpparam.classLoader
-        // 阿里内部加密类
-        for (className in listOf(
-            "com.alibaba.wireless.security.securitybody.encrypt.EncryptManager",
-            "com.alibaba.security.encrypt.EncryptUtils",
-            "com.alibaba.wireless.security.securitybody.SignatureManager",
-            "com.alibaba.security.SecuritySignature"
-        )) {
-            try {
-                val clazz = XposedHelpers.findClass(className, classLoader)
+
+        // 动态查找加密类
+        val encryptClasses = ClassFinder.findClassesByPatterns(classLoader, Constants.ENCRYPT_CLASS_PATTERNS)
+
+        if (encryptClasses.isNotEmpty()) {
+            HookUtils.log("$TAG: 动态找到 ${encryptClasses.size} 个加密类")
+            for (clazz in encryptClasses) {
                 for (methodName in Constants.ENCRYPT_METHODS) {
+                    // Hook String 参数的加密方法
                     try {
                         XposedHelpers.findAndHookMethod(
                             clazz, methodName, String::class.java,
@@ -561,14 +697,14 @@ class RiskControlHooks : HookEntry.HookHandler {
                                     val input = param.args[0] as? String ?: return
                                     if (isSecurityData(input)) {
                                         param.args[0] = tamperSecurityData(input)
-                                        HookUtils.logDebug("$TAG: 篡改加密输入: $className.$methodName")
+                                        HookUtils.logDebug("$TAG: 篡改加密输入: ${clazz.name}.$methodName")
                                     }
                                 }
                             }
                         )
                     } catch (_: NoSuchMethodError) {}
 
-                    // 支持 byte[] 参数的加密方法
+                    // Hook byte[] 参数的加密方法
                     try {
                         XposedHelpers.findAndHookMethod(
                             clazz, methodName, ByteArray::class.java,
@@ -578,205 +714,111 @@ class RiskControlHooks : HookEntry.HookHandler {
                                     val str = try { String(input) } catch (_: Exception) { return }
                                     if (isSecurityData(str)) {
                                         param.args[0] = tamperSecurityData(str).toByteArray()
-                                        HookUtils.logDebug("$TAG: 篡改加密 byte[] 输入: $className.$methodName")
+                                        HookUtils.logDebug("$TAG: 篡改加密 byte[] 输入: ${clazz.name}.$methodName")
                                     }
                                 }
                             }
                         )
                     } catch (_: NoSuchMethodError) {}
                 }
-            } catch (_: ClassNotFoundException) {
-                continue
+            }
+        } else {
+            HookUtils.log("$TAG: 动态查找未找到加密类，回退到硬编码列表")
+            @Suppress("DEPRECATION")
+            for (className in listOf(
+                "com.alibaba.wireless.security.securitybody.encrypt.EncryptManager",
+                "com.alibaba.security.encrypt.EncryptUtils",
+                "com.alibaba.wireless.security.securitybody.SignatureManager",
+                "com.alibaba.security.SecuritySignature"
+            )) {
+                try {
+                    val clazz = XposedHelpers.findClass(className, classLoader)
+                    for (methodName in Constants.ENCRYPT_METHODS) {
+                        try {
+                            XposedHelpers.findAndHookMethod(
+                                clazz, methodName, String::class.java,
+                                object : XC_MethodHook() {
+                                    override fun beforeHookedMethod(param: MethodHookParam) {
+                                        val input = param.args[0] as? String ?: return
+                                        if (isSecurityData(input)) {
+                                            param.args[0] = tamperSecurityData(input)
+                                            HookUtils.logDebug("$TAG: 篡改加密输入: $className.$methodName")
+                                        }
+                                    }
+                                }
+                            )
+                        } catch (_: NoSuchMethodError) {}
+
+                        try {
+                            XposedHelpers.findAndHookMethod(
+                                clazz, methodName, ByteArray::class.java,
+                                object : XC_MethodHook() {
+                                    override fun beforeHookedMethod(param: MethodHookParam) {
+                                        val input = param.args[0] as? ByteArray ?: return
+                                        val str = try { String(input) } catch (_: Exception) { return }
+                                        if (isSecurityData(str)) {
+                                            param.args[0] = tamperSecurityData(str).toByteArray()
+                                            HookUtils.logDebug("$TAG: 篡改加密 byte[] 输入: $className.$methodName")
+                                        }
+                                    }
+                                }
+                            )
+                        } catch (_: NoSuchMethodError) {}
+                    }
+                } catch (_: ClassNotFoundException) {
+                    continue
+                }
             }
         }
 
-        // Hook javax.crypto.Cipher.doFinal
-        try {
-            val cipherClass = javax.crypto.Cipher::class.java
-            // doFinal(byte[])
-            XposedHelpers.findAndHookMethod(
-                cipherClass, "doFinal", ByteArray::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val input = param.args[0] as? ByteArray ?: return
-                        val str = try { String(input) } catch (_: Exception) { return }
-                        if (isSecurityData(str)) {
-                            param.args[0] = tamperSecurityData(str).toByteArray()
-                            HookUtils.logDebug("$TAG: 篡改 Cipher.doFinal byte[]")
-                        }
-                    }
-                }
-            )
-            // doFinal(byte[], int, int)
-            try {
-                XposedHelpers.findAndHookMethod(
-                    cipherClass, "doFinal",
-                    ByteArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            val input = param.args[0] as? ByteArray ?: return
-                            val str = try { String(input) } catch (_: Exception) { return }
-                            if (isSecurityData(str)) {
-                                val tampered = tamperSecurityData(str).toByteArray()
-                                param.args[0] = tampered
-                                param.args[2] = tampered.size
-                                HookUtils.logDebug("$TAG: 篡改 Cipher.doFinal byte[],off,len")
-                            }
-                        }
-                    }
-                )
-            } catch (_: Exception) {}
-            // update(byte[])
-            XposedHelpers.findAndHookMethod(
-                cipherClass, "update", ByteArray::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val input = param.args[0] as? ByteArray ?: return
-                        val str = try { String(input) } catch (_: Exception) { return }
-                        if (isSecurityData(str)) {
-                            param.args[0] = tamperSecurityData(str).toByteArray()
-                            HookUtils.logDebug("$TAG: 篡改 Cipher.update byte[]")
-                        }
-                    }
-                }
-            )
-            HookUtils.logDebug("$TAG: javax.crypto.Cipher Hook 完成")
-        } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: Cipher Hook 失败: ${e.message}")
-        }
-
-        // Hook java.security.MessageDigest.digest
-        try {
-            val mdClass = java.security.MessageDigest::class.java
-            XposedHelpers.findAndHookMethod(
-                mdClass, "digest", ByteArray::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val input = param.args[0] as? ByteArray ?: return
-                        val str = try { String(input) } catch (_: Exception) { return }
-                        if (isSecurityData(str)) {
-                            param.args[0] = tamperSecurityData(str).toByteArray()
-                            HookUtils.logDebug("$TAG: 篡改 MessageDigest.digest byte[]")
-                        }
-                    }
-                }
-            )
-            XposedHelpers.findAndHookMethod(
-                mdClass, "update", ByteArray::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val input = param.args[0] as? ByteArray ?: return
-                        val str = try { String(input) } catch (_: Exception) { return }
-                        if (isSecurityData(str)) {
-                            param.args[0] = tamperSecurityData(str).toByteArray()
-                            HookUtils.logDebug("$TAG: 篡改 MessageDigest.update byte[]")
-                        }
-                    }
-                }
-            )
-            // update(byte[], int, int)
-            try {
-                XposedHelpers.findAndHookMethod(
-                    mdClass, "update",
-                    ByteArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            val input = param.args[0] as? ByteArray ?: return
-                            val str = try { String(input) } catch (_: Exception) { return }
-                            if (isSecurityData(str)) {
-                                val tampered = tamperSecurityData(str).toByteArray()
-                                param.args[0] = tampered
-                                param.args[2] = tampered.size
-                                HookUtils.logDebug("$TAG: 篡改 MessageDigest.update byte[],off,len")
-                            }
-                        }
-                    }
-                )
-            } catch (_: Exception) {}
-            HookUtils.logDebug("$TAG: MessageDigest Hook 完成")
-        } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: MessageDigest Hook 失败: ${e.message}")
-        }
-
-        // Hook javax.crypto.Mac.doFinal / update
-        try {
-            val macClass = javax.crypto.Mac::class.java
-            XposedHelpers.findAndHookMethod(
-                macClass, "doFinal", ByteArray::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val input = param.args[0] as? ByteArray ?: return
-                        val str = try { String(input) } catch (_: Exception) { return }
-                        if (isSecurityData(str)) {
-                            param.args[0] = tamperSecurityData(str).toByteArray()
-                            HookUtils.logDebug("$TAG: 篡改 Mac.doFinal byte[]")
-                        }
-                    }
-                }
-            )
-            XposedHelpers.findAndHookMethod(
-                macClass, "update", ByteArray::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val input = param.args[0] as? ByteArray ?: return
-                        val str = try { String(input) } catch (_: Exception) { return }
-                        if (isSecurityData(str)) {
-                            param.args[0] = tamperSecurityData(str).toByteArray()
-                            HookUtils.logDebug("$TAG: 篡改 Mac.update byte[]")
-                        }
-                    }
-                }
-            )
-            try {
-                XposedHelpers.findAndHookMethod(
-                    macClass, "update",
-                    ByteArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            val input = param.args[0] as? ByteArray ?: return
-                            val str = try { String(input) } catch (_: Exception) { return }
-                            if (isSecurityData(str)) {
-                                val tampered = tamperSecurityData(str).toByteArray()
-                                param.args[0] = tampered
-                                param.args[2] = tampered.size
-                                HookUtils.logDebug("$TAG: 篡改 Mac.update byte[],off,len")
-                            }
-                        }
-                    }
-                )
-            } catch (_: Exception) {}
-            HookUtils.logDebug("$TAG: javax.crypto.Mac Hook 完成")
-        } catch (e: Exception) {
-            HookUtils.logDebug("$TAG: Mac Hook 失败: ${e.message}")
-        }
+        // 注意：已移除全局 Cipher/MessageDigest/Mac Hook
+        // 原因：
+        // 1. 全局 Hook 影响 HTTPS/TLS 等正常加密操作，导致性能严重下降
+        // 2. lbswua/ddsec 的数据流在 native (.so) 层完成，Java 层全局 Hook 无法拦截
+        // 3. 替代方案：精确拦截阿里安全 SDK 特定类（上方代码）+ NativeHook JNI 层拦截
     }
 
     // ==================== 签名验证拦截 ====================
 
     private fun hookSignatureVerification(lpparam: XC_LoadPackage.LoadPackageParam) {
         val classLoader = lpparam.classLoader
-        val signClasses = listOf(
-            "com.alibaba.wireless.security.securitybody.SignatureManager",
-            "com.alibaba.security.SecuritySignature",
-            "com.alibaba.wireless.security.securitybody.IntegrityChecker",
-            "com.alibaba.security.IntegrityCheck"
-        )
 
-        for (className in signClasses) {
-            try {
-                val clazz = XposedHelpers.findClass(className, classLoader)
+        // 动态查找签名验证类
+        val classes = ClassFinder.findClassesByPatterns(classLoader, Constants.SIGNATURE_CLASS_PATTERNS)
+
+        if (classes.isNotEmpty()) {
+            HookUtils.log("$TAG: 动态找到 ${classes.size} 个签名验证类")
+            for (clazz in classes) {
                 for (method in listOf(
                     "verify", "verifySign", "verifySignature", "checkSign",
                     "checkIntegrity", "validate", "validateSign"
                 )) {
                     hookMethodReturnBool(clazz, method, true)
                 }
-            } catch (_: ClassNotFoundException) {
-                continue
+            }
+        } else {
+            HookUtils.log("$TAG: 动态查找未找到签名验证类，回退到硬编码列表")
+            @Suppress("DEPRECATION")
+            val signClasses = listOf(
+                "com.alibaba.wireless.security.securitybody.SignatureManager",
+                "com.alibaba.security.SecuritySignature",
+                "com.alibaba.wireless.security.securitybody.IntegrityChecker",
+                "com.alibaba.security.IntegrityCheck"
+            )
+            for (className in signClasses) {
+                try {
+                    val clazz = XposedHelpers.findClass(className, classLoader)
+                    for (method in listOf(
+                        "verify", "verifySign", "verifySignature", "checkSign",
+                        "checkIntegrity", "validate", "validateSign"
+                    )) {
+                        hookMethodReturnBool(clazz, method, true)
+                    }
+                } catch (_: ClassNotFoundException) {
+                    continue
+                }
             }
         }
-
-        // No-op: removed useless getPackageInfo hook
     }
 
     // ==================== 通用辅助方法 ====================
