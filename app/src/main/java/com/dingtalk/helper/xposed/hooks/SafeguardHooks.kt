@@ -62,6 +62,9 @@ class SafeguardHooks : HookEntry.HookHandler {
         hookSecureSignatureComponent(lpparam)
         hookAntiCheatingHelper(lpparam)
         hookSafeGuardDispatcher(lpparam)
+        // 新增：拦截 JNI 桥接方法和 Location 类全局方法
+        hookCppProxyExecCmd(lpparam)
+        hookLocationClassGlobal(lpparam)
 
         HookUtils.log("$TAG: SafeGuard Hook 注入完成")
     }
@@ -925,6 +928,227 @@ class SafeguardHooks : HookEntry.HookHandler {
             val extras = android.os.Bundle()
             extras.putInt("satellites", FakeDataProvider.getSatellites().count { it.usedInFix })
             setExtras(extras)
+        }
+    }
+
+    /**
+     * Hook SafeGuardInterface.CppProxy.execCmdNative() - 拦截所有 JNI 命令
+     *
+     * 这是 Java 层调用 native 库的最终入口
+     * 所有安全数据采集、加密、签名都通过此方法进入 native 层
+     * Hook 此方法可以在数据进入 native 层前进行最后拦截
+     */
+    private fun hookCppProxyExecCmd(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val classNames = listOf(
+            "com.alibaba.dingtalk.safeguard.SafeGuardInterface\$CppProxy",
+            "com.alibaba.dingtalk.safeguard.a\$a"  // 混淆后的类名
+        )
+
+        for (className in classNames) {
+            try {
+                val clazz = XposedHelpers.findClass(className, lpparam.classLoader)
+
+                // Hook execCmdNative - 主要的 JNI 入口
+                try {
+                    val methods = clazz.declaredMethods.filter {
+                        it.name.contains("execCmd") && it.parameterTypes.any { type ->
+                            type.name.contains("CommandType") || type.name.contains("CommandArgv")
+                        }
+                    }
+
+                    for (method in methods) {
+                        XposedHelpers.findAndHookMethod(
+                            clazz,
+                            method.name,
+                            *method.parameterTypes,
+                            object : XC_MethodHook() {
+                                override fun beforeHookedMethod(param: MethodHookParam) {
+                                    HookUtils.logDebug("$TAG: CppProxy.${method.name} 被调用 " +
+                                        "(参数: ${param.args.size})")
+                                }
+
+                                override fun afterHookedMethod(param: MethodHookParam) {
+                                    // 记录返回值类型
+                                    val result = param.result
+                                    if (result != null) {
+                                        HookUtils.logDebug("$TAG: CppProxy.${method.name} 返回: " +
+                                            "${result.javaClass.simpleName}")
+                                    }
+                                }
+                            }
+                        )
+                        HookUtils.log("$TAG: CppProxy.${method.name} Hook 完成")
+                    }
+                } catch (e: Exception) {
+                    HookUtils.logDebug("$TAG: CppProxy.execCmd Hook 失败: ${e.message}")
+                }
+
+                // Hook getInterface - 获取安全接口
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        clazz,
+                        "getInterface",
+                        object : XC_MethodHook() {
+                            override fun afterHookedMethod(param: MethodHookParam) {
+                                HookUtils.logDebug("$TAG: CppProxy.getInterface 被调用")
+                            }
+                        }
+                    )
+                } catch (_: Exception) {}
+
+                break
+            } catch (_: ClassNotFoundException) {
+                continue
+            }
+        }
+    }
+
+    /**
+     * Hook Location 类全局方法 - 确保所有调用者看到一致的伪造数据
+     *
+     * 这是一个备份 Hook，即使 SafeguardHooks 的特定 Hook 失败，
+     * 也能确保 native 层通过 Location 对象读取到伪造坐标
+     */
+    private fun hookLocationClassGlobal(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val locationClass = Location::class.java
+
+            // Hook getLatitude - 全局替换
+            XposedHelpers.findAndHookMethod(
+                locationClass,
+                "getLatitude",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!ConfigManager.isFakeLocationEnabled()) return
+                        // 只对 mock 位置替换，避免影响真实位置
+                        val location = param.thisObject as? Location ?: return
+                        try {
+                            val field = Location::class.java.getDeclaredField("mIsMock")
+                            field.isAccessible = true
+                            if (field.getBoolean(location)) {
+                                val fakeData = FakeDataProvider.getCurrentFakeLocation()
+                                param.result = fakeData.latitude
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+
+            // Hook getLongitude - 全局替换
+            XposedHelpers.findAndHookMethod(
+                locationClass,
+                "getLongitude",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!ConfigManager.isFakeLocationEnabled()) return
+                        val location = param.thisObject as? Location ?: return
+                        try {
+                            val field = Location::class.java.getDeclaredField("mIsMock")
+                            field.isAccessible = true
+                            if (field.getBoolean(location)) {
+                                val fakeData = FakeDataProvider.getCurrentFakeLocation()
+                                param.result = fakeData.longitude
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+
+            // Hook isFromMockProvider - 全局返回 false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                XposedHelpers.findAndHookMethod(
+                    locationClass,
+                    "isFromMockProvider",
+                    object : XC_MethodReplacement() {
+                        override fun replaceHookedMethod(param: MethodHookParam): Any = false
+                    }
+                )
+            }
+
+            // Hook isMock - 全局返回 false
+            XposedHelpers.findAndHookMethod(
+                locationClass,
+                "isMock",
+                object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Any = false
+                }
+            )
+
+            // Hook getProvider - 对 mock 位置返回 "gps"
+            XposedHelpers.findAndHookMethod(
+                locationClass,
+                "getProvider",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val location = param.thisObject as? Location ?: return
+                        try {
+                            val field = Location::class.java.getDeclaredField("mIsMock")
+                            field.isAccessible = true
+                            if (field.getBoolean(location)) {
+                                param.result = LocationManager.GPS_PROVIDER
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+
+            // Hook hasSpeed - 确保返回 true
+            XposedHelpers.findAndHookMethod(
+                locationClass,
+                "hasSpeed",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val location = param.thisObject as? Location ?: return
+                        try {
+                            val field = Location::class.java.getDeclaredField("mIsMock")
+                            field.isAccessible = true
+                            if (field.getBoolean(location)) {
+                                param.result = true
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+
+            // Hook hasBearing - 确保返回 true
+            XposedHelpers.findAndHookMethod(
+                locationClass,
+                "hasBearing",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val location = param.thisObject as? Location ?: return
+                        try {
+                            val field = Location::class.java.getDeclaredField("mIsMock")
+                            field.isAccessible = true
+                            if (field.getBoolean(location)) {
+                                param.result = true
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+
+            // Hook hasAltitude - 确保返回 true
+            XposedHelpers.findAndHookMethod(
+                locationClass,
+                "hasAltitude",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val location = param.thisObject as? Location ?: return
+                        try {
+                            val field = Location::class.java.getDeclaredField("mIsMock")
+                            field.isAccessible = true
+                            if (field.getBoolean(location)) {
+                                param.result = true
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+            )
+
+            HookUtils.log("$TAG: Location 类全局 Hook 完成")
+        } catch (e: Exception) {
+            HookUtils.logDebug("$TAG: Location 类全局 Hook 失败: ${e.message}")
         }
     }
 }
